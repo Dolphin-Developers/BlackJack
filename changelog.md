@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3
+
+- Added statistics tracking: Win/loss/push counts and win rate percentage
+- Statistics window accessible from result screen (Right button)
+- Double down feature: Double bet on first 2 cards, draw one card, then stand (Up button)
+- Split pairs: Split pairs into two hands, play sequentially (Down button)
+- Help screen: Accessible via Right button during play, shows all controls
+- UI improvements: Larger result box (40px height) to accommodate split hand results
+- Footer simplified to one line with abbreviated controls (K=Hit BK=Stand R=Help)
+- Card positions adjusted to avoid footer collision
+- Split hand results display both hands in result box (P1: P2: D:)
+
 ## v0.2
 
 - Added betting system: Start with $3,125, bet $5-$500 per hand
