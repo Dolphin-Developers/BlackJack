@@ -24,12 +24,12 @@ These requirements come from the [Apps Catalog: Contribution Guide](https://gith
 
 | Item | Requirement | Status |
 |------|-------------|--------|
-| **Build** | Buildable with [uFBT](https://pypi.org/project/ufbt/), compatible with latest **Release** or **Release Candidate** firmware | To do |
+| **Build** | Buildable with [uFBT](https://pypi.org/project/ufbt/), compatible with latest **Release** or **Release Candidate** firmware | ✅ Done |
 | **Hosting** | Public Git repo; catalog accepts **GitHub** only | ✅ GitHub repo |
-| **App icon** | 10×10 px, 1-bit `.png`, in repo | To do |
-| **Screenshots** | At least one; taken with **qFlipper**; do not change resolution or format | To do |
-| **README.md** | Markdown: usage, hardware add-ons, etc.; shown as app description in catalog | To do |
-| **changelog.md** | Markdown; versioned changes (see format below) | To do |
+| **App icon** | 10×10 px, 1-bit `.png`, in repo | ✅ Done |
+| **Screenshots** | At least one; taken with **qFlipper**; do not change resolution or format | ⚠️ To do |
+| **README.md** | Markdown: usage, hardware add-ons, etc.; shown as app description in catalog | ✅ Done |
+| **changelog.md** | Markdown; versioned changes (see format below) | ✅ Done |
 
 Changelog format (from Contributing.md):
 
@@ -117,12 +117,12 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 
 ### Phase 0 — Project setup and catalog readiness
 
-- [ ] Install uFBT and create app scaffold (`ufbt create APPID=blackjack`).
-- [ ] Add `application.fam` with correct `appid`, `name`, `fap_category="Games"`, `fap_version`, `fap_icon`, `fap_description`, `fap_author`, `entry_point`.
-- [ ] Add 10×10 1-bit `.png` icon.
-- [ ] Add `README.md` (how to play, controls, any hardware notes).
-- [ ] Add `changelog.md` (v0.1 initial release).
-- [ ] Ensure build with `ufbt` and compatibility with latest release/RC firmware.
+- [x] Install uFBT and create app scaffold (`ufbt create APPID=blackjack`).
+- [x] Add `application.fam` with correct `appid`, `name`, `fap_category="Games"`, `fap_version`, `fap_icon`, `fap_description`, `fap_author`, `entry_point`.
+- [x] Add 10×10 1-bit `.png` icon.
+- [x] Add `README.md` (how to play, controls, any hardware notes).
+- [x] Add `changelog.md` (versioned).
+- [x] Ensure build with `ufbt` and compatibility with latest release/RC firmware.
 - [ ] Take at least one screenshot with qFlipper; add path to future `manifest.yml`.
 
 ### Phase 1 — Core game (MVP)
@@ -144,18 +144,19 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 - [ ] **Visual/audio**: Card reveal animation or beep on deal/hit; optional short “win/lose” feedback (vibration/sound if API available).
 - [ ] **Edge cases**: Double aces (soft 22) treated as 12; clear bust/blackjack messaging.
 
-### Phase 3 — Optional extras (post–catalog v1)
+### Phase 3 — Optional extras
 
-- [ ] **Double down**: Allow double on initial two cards (one card only).
-- [ ] **Split**: Split pairs; play two hands (if UI/UX fits the device).
-- [ ] **Chips/betting**: Virtual chips and simple bet-before-deal (no real money; keep UGC/compliance in mind).
-- [ ] **Settings**: Optional sound on/off, or difficulty (e.g. dealer stands on S17 vs H17) if we add variants.
+- [x] **Double down**: Allow double on initial two cards (one card only). (Up button.)
+- [x] **Split**: Split pairs; prompt "Split Pair?"; play two hands; player cards as text during split.
+- [x] **Chips/betting**: Virtual chips and bet-before-deal ($3,125 start, $5–$500).
+- [ ] **Settings**: Optional sound on/off or dealer rules (future).
 
 ### Phase 4 — Catalog submission
 
-- [ ] Finalize `application.fam` and repo (icon, README, changelog, screenshots).
-- [ ] Fork [flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog), create branch (e.g. `username_blackjack_0.1`).
-- [ ] Add `applications/Games/blackjack/manifest.yml` with `sourcecode`, `screenshots`, `changelog`, `description`, `short_description`, `name`, `id`, `category`, `version`.
+- [ ] **Screenshot**: Take at least one with qFlipper → `screenshots/ss0.png` (required).
+- [x] Finalize `application.fam` and repo (icon, README, changelog; version 0.3).
+- [ ] Fork [flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog), create branch (e.g. `username_blackjack_0.3`).
+- [ ] Add `applications/Games/blackjack/manifest.yml` with `sourcecode`, `screenshots`, `changelog`, `description`, `short_description`, `name`, `id`, `category`, `version` (0.3).
 - [ ] Run catalog validation: `python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundle.zip`.
 - [ ] Open PR, fill template, respond to review within 14 days if asked for changes.
 
@@ -167,4 +168,4 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 - **SDK**: uFBT from [Flipper downloads](https://flipper.net/pages/downloads); docs at [docs.flipper.net](https://docs.flipper.net/) and [uFBT repo](https://github.com/flipperdevices/flipperzero-ufbt).
 - **Catalog**: Publish via PR to `flipper-application-catalog` with `manifest.yml` under `applications/Games/blackjack/`; validate before submit.
 
-Next practical step: **Phase 0** — install uFBT, run `ufbt create APPID=blackjack`, then implement **Phase 1** (deck, deal, hit/stand, dealer logic, win/loss, basic UI and controls).
+Next practical step: **Phase 4** — take qFlipper screenshot → `screenshots/ss0.png`, then fork catalog repo, add `applications/Games/blackjack/manifest.yml`, validate, and open PR.

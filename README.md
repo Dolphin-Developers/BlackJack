@@ -11,6 +11,9 @@ Classic **Blackjack** (21) for Flipper Zero. Play against the dealer: get closer
 - Dealer must draw to 16 and stand on 17 or higher.
 - **Payouts**: Win = 1:1 (double your bet), Blackjack = 3:2, Push = bet returned, Loss = bet lost.
 - **Special rules**: Player wins with 6 cards without busting. Dealer busts if they draw 6 cards without winning.
+- **3-deck shoe**: 156 cards; top card and bottom 20 are burned; reshuffle is announced on screen.
+- **Split**: When you have a pair, you are asked "Split Pair?" — Down=Yes, Back=No.
+- **Statistics**: Scroll with Up/Down (loops); Back to return.
 
 ## Controls
 
@@ -52,7 +55,7 @@ Classic **Blackjack** (21) for Flipper Zero. Play against the dealer: get closer
 - **Visual cards**: Black cards with white text, arranged in 2-column grid
 - **Chip stack**: Visual indicator grows with bet amount (1 chip per $25)
 - **Result overlay**: Centered white box shows final scores and outcome
-- **Statistics**: Track wins, losses, pushes, and win rate (Right button on result screen)
+- **Statistics**: Track wins, losses, pushes, and win rate (Right on result screen); scrollable list (Up/Down, loops)
 - **6-card rule**: Win with 6 cards without busting (rare but rewarding!)
 
 ## Installation

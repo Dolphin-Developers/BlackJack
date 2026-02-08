@@ -14,7 +14,10 @@
 #define TAG "blackjack"
 #define MAX_HAND 6
 #define MAX_SPLIT_HANDS 2  /* Maximum number of hands after split */
-#define DECK_SIZE 52
+#define DECKS 3
+#define DECK_SIZE (52 * DECKS)  /* 3 deck shoe = 156 cards */
+#define BURN_TOP 1  /* Burn top card */
+#define BURN_BOTTOM 20  /* Burn bottom 20 cards */
 #define CARD_VALUE(c) ((c) % 13)   /* 0=2, 1=3, ..., 9=10, 10=J, 11=Q, 12=K, (12 or 0 for A in rank) */
 #define CARD_SUIT(c) ((c) / 13)    /* 0=S, 1=H, 2=D, 3=C */
 #define CARD_RANK(c) ((c) % 13)    /* Get card rank (0-12) for pair detection */
@@ -23,11 +26,13 @@ typedef enum {
     PhaseBetting,
     PhaseDeal,
     PhasePlayerTurn,
+    PhaseSplitPrompt,
     PhaseDealerTurn,
     PhaseShowFinalCards,
     PhaseResult,
     PhaseStatistics,
-    PhaseHelp
+    PhaseHelp,
+    PhaseReshuffle
 } GamePhase;
 
 #define STARTING_BALANCE 3125
@@ -38,6 +43,8 @@ typedef enum {
 typedef struct {
     uint8_t deck[DECK_SIZE];
     uint8_t deck_top;
+    uint8_t deck_bottom; /* Track position for burning bottom cards */
+    bool reshuffle_announced; /* Track if reshuffle was announced */
     uint8_t player_hand[MAX_HAND];
     uint8_t player_count;
     uint8_t player_hand2[MAX_HAND]; /* Second hand after split */
@@ -61,7 +68,12 @@ typedef struct {
     uint16_t games_won;
     uint16_t games_lost;
     uint16_t games_pushed;
+    uint8_t stat_scroll; /* Scroll offset for stats menu (0 = top, loops) */
 } BlackjackState;
+
+#define STAT_LINES 5   /* Games, Wins, Losses, Pushes, Win Rate */
+#define STAT_VISIBLE 3 /* Lines visible at once */
+#define STAT_MAX_SCROLL (STAT_LINES > STAT_VISIBLE ? STAT_LINES - STAT_VISIBLE : 0)
 
 /* Best hand value (Ace 1 or 11). Returns 0-31; >21 is bust. */
 static uint8_t hand_value(const uint8_t* hand, uint8_t count) {
@@ -80,8 +92,34 @@ static uint8_t hand_value(const uint8_t* hand, uint8_t count) {
     return total;
 }
 
+/* Get soft value (with ace as 11) and hard value (with ace as 1) */
+static void hand_values_soft_hard(const uint8_t* hand, uint8_t count, uint8_t* soft, uint8_t* hard) {
+    uint8_t total = 0;
+    uint8_t aces = 0;
+    for(uint8_t i = 0; i < count; i++) {
+        uint8_t v = hand[i] % 13;
+        if(v >= 9) total += 10; /* 10, J, Q, K */
+        else if(v == 12) { total += 11; aces++; } /* A */
+        else total += v + 2; /* 2..9 */
+    }
+    *soft = total;
+    *hard = total;
+    if(aces > 0 && total <= 21) {
+        *hard = total - 10; /* Hard value (ace as 1) */
+    }
+    /* If soft > 21, adjust */
+    while(*soft > 21 && aces) {
+        *soft -= 10;
+        aces--;
+    }
+}
+
 static void shuffle_deck(uint8_t* deck) {
-    for(int i = 0; i < DECK_SIZE; i++) deck[i] = (uint8_t)i;
+    /* Create 3 decks */
+    for(int i = 0; i < DECK_SIZE; i++) {
+        deck[i] = (uint8_t)(i % 52);
+    }
+    /* Fisher-Yates shuffle */
     for(int i = DECK_SIZE - 1; i > 0; i--) {
         int j = rand() % (i + 1);
         uint8_t t = deck[i];
@@ -91,9 +129,19 @@ static void shuffle_deck(uint8_t* deck) {
 }
 
 static uint8_t draw_card(BlackjackState* s) {
+    /* Check if we've reached the burn zone (bottom 20 cards) */
+    if(s->deck_top >= (DECK_SIZE - BURN_BOTTOM)) {
+        /* Reshuffle when reaching burn zone */
+        shuffle_deck(s->deck);
+        s->deck_top = BURN_TOP; /* Burn top card */
+        s->deck_bottom = DECK_SIZE - BURN_BOTTOM;
+        s->reshuffle_announced = false; /* Need to announce */
+    }
     if(s->deck_top >= DECK_SIZE) {
         shuffle_deck(s->deck);
-        s->deck_top = 0;
+        s->deck_top = BURN_TOP; /* Burn top card */
+        s->deck_bottom = DECK_SIZE - BURN_BOTTOM;
+        s->reshuffle_announced = false; /* Need to announce */
     }
     return s->deck[s->deck_top++];
 }
@@ -169,6 +217,7 @@ static void game_start_betting(BlackjackState* s) {
 
 static void game_show_statistics(BlackjackState* s) {
     s->phase = PhaseStatistics;
+    s->stat_scroll = 0;
 }
 
 static void game_show_help(BlackjackState* s) {
@@ -184,7 +233,9 @@ static void game_place_bet(BlackjackState* s) {
 
 static void game_deal_cards(BlackjackState* s) {
     shuffle_deck(s->deck);
-    s->deck_top = 0;
+    s->deck_top = BURN_TOP; /* Burn top card */
+    s->deck_bottom = DECK_SIZE - BURN_BOTTOM;
+    s->reshuffle_announced = true; /* Already shuffled, no need to announce */
     s->player_count = 0;
     s->dealer_count = 0;
     s->dealer_hole = true;
@@ -194,6 +245,12 @@ static void game_deal_cards(BlackjackState* s) {
     s->dealer_hand[s->dealer_count++] = draw_card(s);
     s->player_hand[s->player_count++] = draw_card(s);
     s->dealer_hand[s->dealer_count++] = draw_card(s);
+    
+    /* Check if reshuffle happened during deal */
+    if(!s->reshuffle_announced) {
+        s->phase = PhaseReshuffle;
+        return;
+    }
 
     uint8_t pv = hand_value(s->player_hand, s->player_count);
     if(pv == 21) {
@@ -212,12 +269,16 @@ static void game_deal_cards(BlackjackState* s) {
         }
         s->result_msg[sizeof(s->result_msg) - 1] = '\0';
     } else {
-        s->phase = PhasePlayerTurn;
-        /* Can double down if player has exactly 2 cards and enough balance to double bet */
-        s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
-        /* Can split if first 2 cards are same rank and enough balance for second bet */
+        /* Check if player can split */
         bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
         s->can_split = (is_pair && (s->balance >= s->current_bet));
+        if(s->can_split) {
+            s->phase = PhaseSplitPrompt;
+        } else {
+            s->phase = PhasePlayerTurn;
+            /* Can double down if player has exactly 2 cards and enough balance to double bet */
+            s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
+        }
     }
 }
 
@@ -510,41 +571,56 @@ static void draw_callback(Canvas* canvas, void* model) {
         canvas_draw_str(canvas, 0, 54, "Left/Right=Adjust");
         canvas_draw_str(canvas, 0, 62, "OK=Deal  Back=Exit");
     } else if(s->phase == PhaseStatistics) {
-        /* Statistics display */
+        /* Statistics display - scrollable, loops top-bottom bottom-top */
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 0, 10, "Statistics");
         
         canvas_set_font(canvas, FontSecondary);
         char stat_buf[32];
-        
-        snprintf(stat_buf, sizeof(stat_buf), "Games: %u", s->games_played);
-        canvas_draw_str(canvas, 0, 22, stat_buf);
-        
-        snprintf(stat_buf, sizeof(stat_buf), "Wins: %u", s->games_won);
-        canvas_draw_str(canvas, 0, 32, stat_buf);
-        
-        snprintf(stat_buf, sizeof(stat_buf), "Losses: %u", s->games_lost);
-        canvas_draw_str(canvas, 0, 42, stat_buf);
-        
-        snprintf(stat_buf, sizeof(stat_buf), "Pushes: %u", s->games_pushed);
-        canvas_draw_str(canvas, 0, 52, stat_buf);
-        
-        /* Calculate win rate */
-        if(s->games_played > 0) {
-            uint16_t win_rate = (s->games_won * 100) / s->games_played;
-            snprintf(stat_buf, sizeof(stat_buf), "Win Rate: %u%%", win_rate);
-            canvas_draw_str(canvas, 0, 62, stat_buf);
+        /* Build stat lines - scroll window, no modulo (show consecutive lines) */
+        const int line_h = 10;
+        int y = 20;
+        for(uint8_t i = 0; i < STAT_VISIBLE; i++) {
+            uint8_t idx = s->stat_scroll + i;
+            if(idx >= STAT_LINES) idx = STAT_LINES - 1;
+            switch(idx) {
+            case 0:
+                snprintf(stat_buf, sizeof(stat_buf), "Games: %u", s->games_played);
+                break;
+            case 1:
+                snprintf(stat_buf, sizeof(stat_buf), "Wins: %u", s->games_won);
+                break;
+            case 2:
+                snprintf(stat_buf, sizeof(stat_buf), "Losses: %u", s->games_lost);
+                break;
+            case 3:
+                snprintf(stat_buf, sizeof(stat_buf), "Pushes: %u", s->games_pushed);
+                break;
+            case 4: {
+                if(s->games_played > 0) {
+                    uint16_t win_rate = (s->games_won * 100) / s->games_played;
+                    snprintf(stat_buf, sizeof(stat_buf), "Win Rate: %u%%", win_rate);
+                } else {
+                    snprintf(stat_buf, sizeof(stat_buf), "Win Rate: --");
+                }
+                break;
+            }
+            default:
+                stat_buf[0] = '\0';
+                break;
+            }
+            canvas_draw_str(canvas, 0, y + (i * line_h), stat_buf);
         }
         
         /* Footer instructions */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 56, "Back=Return");
+        canvas_draw_str(canvas, 0, 62, "Up/Down=Scroll Back=Return");
     } else if(s->phase == PhaseHelp) {
-        /* Help screen - similar to result box */
-        int box_x = 10;
-        int box_y = 10;
-        int box_w = 108;
-        int box_h = 52;
+        /* Help screen - enlarged box, no footer */
+        int box_x = 5;
+        int box_y = 5;
+        int box_w = 118;
+        int box_h = 57;
         /* White box */
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
@@ -565,9 +641,52 @@ static void draw_callback(Canvas* canvas, void* model) {
         canvas_draw_str(canvas, box_x + 4, y_pos, "Left=Bet OK=Again");
         y_pos += 8;
         canvas_draw_str(canvas, box_x + 4, y_pos, "Right=Stats");
+        y_pos += 8;
+        canvas_draw_str(canvas, box_x + 4, y_pos, "Back=Return");
+    } else if(s->phase == PhaseReshuffle) {
+        /* Reshuffle announcement - result box style */
+        int box_x = 10;
+        int box_y = 20;
+        int box_w = 108;
+        int box_h = 28;
+        /* White box */
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
+        /* Black outline */
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
+        /* Reshuffle text */
+        canvas_set_font(canvas, FontPrimary);
+        const char* reshuffle_text = "Reshuffling...";
+        int text_x = box_x + (box_w - canvas_string_width(canvas, reshuffle_text)) / 2;
+        canvas_draw_str(canvas, text_x, box_y + 18, reshuffle_text);
         /* Footer */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 62, "Back=Return");
+        canvas_draw_str(canvas, 0, 62, "OK=Continue");
+    } else if(s->phase == PhaseSplitPrompt) {
+        /* Split prompt - result box style */
+        int box_x = 10;
+        int box_y = 20;
+        int box_w = 108;
+        int box_h = 28;
+        /* White box */
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
+        /* Black outline */
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
+        /* Split prompt text */
+        canvas_set_font(canvas, FontPrimary);
+        const char* split_text = "Split Pair?";
+        int text_x = box_x + (box_w - canvas_string_width(canvas, split_text)) / 2;
+        canvas_draw_str(canvas, text_x, box_y + 12, split_text);
+        canvas_set_font(canvas, FontSecondary);
+        const char* split_controls = "Down=Yes  Back=No";
+        int ctrl_x = box_x + (box_w - canvas_string_width(canvas, split_controls)) / 2;
+        canvas_draw_str(canvas, ctrl_x, box_y + 22, split_controls);
+        /* Footer */
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 0, 62, "Down=Split Back=No");
     } else if(s->phase == PhaseDeal || s->phase == PhasePlayerTurn || s->phase == PhaseDealerTurn || s->phase == PhaseShowFinalCards || s->phase == PhaseResult) {
         /* Show bet amount on right side */
         canvas_set_font(canvas, FontSecondary);
@@ -597,48 +716,57 @@ static void draw_callback(Canvas* canvas, void* model) {
             }
             draw_card_graphic(canvas, x, y, s->dealer_hand[i], (i == 0 && s->dealer_hole));
         }
-        /* Draw dealer hand value directly underneath "D:" label */
-        if(!s->dealer_hole && s->dealer_count > 0) {
-            uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
-            char vbuf[8];
-            snprintf(vbuf, sizeof(vbuf), "%u", dv);
-            canvas_set_font(canvas, FontSecondary);
-            canvas_draw_str(canvas, 0, 32, vbuf);
-        }
 
         /* Draw player cards - right side, overlay cards 3+ on bottom half (moved up to avoid footer) */
         canvas_set_font(canvas, FontPrimary);
         if(s->is_split) {
-            /* Show both hands when split */
+            /* Show both hands when split - use text instead of graphics */
             /* Hand 1 */
             canvas_draw_str(canvas, 54, 24, s->active_hand == 0 ? "P1:*" : "P1:"); /* * indicates active */
-            card_x = 70;
-            card_y = 16;
-            for(uint8_t i = 0; i < s->player_count; i++) {
-                int col = i % 2;
-                int x = card_x + (col * 18);
-                int y = (i < 2) ? (card_y + (i / 2) * 24) : (card_y + ((i - 2) / 2) * 24 + 11);
-                draw_card_graphic(canvas, x, y, s->player_hand[i], false);
-            }
-            uint8_t pv1 = hand_value(s->player_hand, s->player_count);
-            char vbuf[8];
-            snprintf(vbuf, sizeof(vbuf), "%u", pv1);
             canvas_set_font(canvas, FontSecondary);
+            char hand1_buf[32] = "";
+            int hand1_len = 0;
+            for(uint8_t i = 0; i < s->player_count && hand1_len < (int)sizeof(hand1_buf) - 4; i++) {
+                char card_buf[8];
+                int len = snprintf(card_buf, sizeof(card_buf), "%s%c ", card_rank_str(s->player_hand[i]), card_suit_char(s->player_hand[i]));
+                if(hand1_len + len < (int)sizeof(hand1_buf)) {
+                    strncpy(hand1_buf + hand1_len, card_buf, sizeof(hand1_buf) - hand1_len);
+                    hand1_len += len;
+                }
+            }
+            canvas_draw_str(canvas, 70, 24, hand1_buf);
+            uint8_t pv1_soft, pv1_hard;
+            hand_values_soft_hard(s->player_hand, s->player_count, &pv1_soft, &pv1_hard);
+            char vbuf[16];
+            if(pv1_soft != pv1_hard && pv1_soft <= 21) {
+                snprintf(vbuf, sizeof(vbuf), "%u or %u", pv1_soft, pv1_hard);
+            } else {
+                snprintf(vbuf, sizeof(vbuf), "%u", pv1_soft);
+            }
             canvas_draw_str(canvas, 54, 32, vbuf);
             
             /* Hand 2 */
             canvas_set_font(canvas, FontPrimary);
             canvas_draw_str(canvas, 54, 40, s->active_hand == 1 ? "P2:*" : "P2:");
-            card_y = 32;
-            for(uint8_t i = 0; i < s->player_count2; i++) {
-                int col = i % 2;
-                int x = card_x + (col * 18);
-                int y = (i < 2) ? (card_y + (i / 2) * 24) : (card_y + ((i - 2) / 2) * 24 + 11);
-                draw_card_graphic(canvas, x, y, s->player_hand2[i], false);
-            }
-            uint8_t pv2 = hand_value(s->player_hand2, s->player_count2);
-            snprintf(vbuf, sizeof(vbuf), "%u", pv2);
             canvas_set_font(canvas, FontSecondary);
+            char hand2_buf[32] = "";
+            int hand2_len = 0;
+            for(uint8_t i = 0; i < s->player_count2 && hand2_len < (int)sizeof(hand2_buf) - 4; i++) {
+                char card_buf[8];
+                int len = snprintf(card_buf, sizeof(card_buf), "%s%c ", card_rank_str(s->player_hand2[i]), card_suit_char(s->player_hand2[i]));
+                if(hand2_len + len < (int)sizeof(hand2_buf)) {
+                    strncpy(hand2_buf + hand2_len, card_buf, sizeof(hand2_buf) - hand2_len);
+                    hand2_len += len;
+                }
+            }
+            canvas_draw_str(canvas, 70, 40, hand2_buf);
+            uint8_t pv2_soft, pv2_hard;
+            hand_values_soft_hard(s->player_hand2, s->player_count2, &pv2_soft, &pv2_hard);
+            if(pv2_soft != pv2_hard && pv2_soft <= 21) {
+                snprintf(vbuf, sizeof(vbuf), "%u or %u", pv2_soft, pv2_hard);
+            } else {
+                snprintf(vbuf, sizeof(vbuf), "%u", pv2_soft);
+            }
             canvas_draw_str(canvas, 54, 48, vbuf);
         } else {
             /* Single hand */
@@ -661,12 +789,30 @@ static void draw_callback(Canvas* canvas, void* model) {
                 }
                 draw_card_graphic(canvas, x, y, s->player_hand[i], false);
             }
-            /* Draw player hand value directly underneath "P:" label */
-            uint8_t pv = hand_value(s->player_hand, s->player_count);
-            char vbuf[8];
-            snprintf(vbuf, sizeof(vbuf), "%u", pv);
+            /* Draw player hand value directly underneath "P:" label - show soft/hard for aces */
+            uint8_t pv_soft, pv_hard;
+            hand_values_soft_hard(s->player_hand, s->player_count, &pv_soft, &pv_hard);
+            char vbuf[16];
+            if(pv_soft != pv_hard && pv_soft <= 21) {
+                snprintf(vbuf, sizeof(vbuf), "%u or %u", pv_soft, pv_hard);
+            } else {
+                snprintf(vbuf, sizeof(vbuf), "%u", pv_soft);
+            }
             canvas_set_font(canvas, FontSecondary);
             canvas_draw_str(canvas, 54, 32, vbuf);
+        }
+        /* Draw dealer hand value with soft/hard for aces */
+        if(!s->dealer_hole && s->dealer_count > 0) {
+            uint8_t dv_soft, dv_hard;
+            hand_values_soft_hard(s->dealer_hand, s->dealer_count, &dv_soft, &dv_hard);
+            char dvbuf[16];
+            if(dv_soft != dv_hard && dv_soft <= 21) {
+                snprintf(dvbuf, sizeof(dvbuf), "%u or %u", dv_soft, dv_hard);
+            } else {
+                snprintf(dvbuf, sizeof(dvbuf), "%u", dv_soft);
+            }
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str(canvas, 0, 32, dvbuf);
         }
 
         /* Help text in footer - one line */
@@ -729,6 +875,14 @@ static bool input_callback(InputEvent* event, void* context) {
             view_commit_model(app->view, true);
             return true;
         }
+        if(s->phase == PhaseSplitPrompt) {
+            /* Decline split - continue with normal play */
+            s->phase = PhasePlayerTurn;
+            s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
+            s->can_split = false;
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseStatistics) {
             /* Return from statistics to result screen */
             s->phase = PhaseResult;
@@ -749,6 +903,62 @@ static bool input_callback(InputEvent* event, void* context) {
         return false;
     }
     if(event->key == InputKeyOk) {
+        if(s->phase == PhaseReshuffle) {
+            /* Continue after reshuffle */
+            s->reshuffle_announced = true;
+            /* If we were dealing, continue */
+            if(s->player_count < 2 || s->dealer_count < 2) {
+                s->phase = PhaseDeal;
+                /* Continue dealing */
+                while(s->player_count < 2) {
+                    s->player_hand[s->player_count++] = draw_card(s);
+                    if(!s->reshuffle_announced) {
+                        s->phase = PhaseReshuffle;
+                        view_commit_model(app->view, true);
+                        return true;
+                    }
+                }
+                while(s->dealer_count < 2) {
+                    s->dealer_hand[s->dealer_count++] = draw_card(s);
+                    if(!s->reshuffle_announced) {
+                        s->phase = PhaseReshuffle;
+                        view_commit_model(app->view, true);
+                        return true;
+                    }
+                }
+                /* Finish dealing */
+                uint8_t pv = hand_value(s->player_hand, s->player_count);
+                if(pv == 21) {
+                    s->is_blackjack = true;
+                    s->dealer_hole = false;
+                    s->phase = PhaseShowFinalCards;
+                    uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+                    if(dv == 21) {
+                        s->balance += s->current_bet;
+                        snprintf(s->result_msg, sizeof(s->result_msg), "Push. +$%u", s->current_bet);
+                    } else {
+                        uint16_t payout = s->current_bet + (s->current_bet * 3 / 2);
+                        s->balance += payout;
+                        snprintf(s->result_msg, sizeof(s->result_msg), "Blackjack! +$%u", payout);
+                    }
+                    s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+                } else {
+                    bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
+                    s->can_split = (is_pair && (s->balance >= s->current_bet));
+                    if(s->can_split) {
+                        s->phase = PhaseSplitPrompt;
+                    } else {
+                        s->phase = PhasePlayerTurn;
+                        s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
+                    }
+                }
+            } else {
+                /* Return to player turn */
+                s->phase = PhasePlayerTurn;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseBetting) {
             game_place_bet(s);
             view_commit_model(app->view, true);
@@ -811,6 +1021,16 @@ static bool input_callback(InputEvent* event, void* context) {
         }
     }
     if(event->key == InputKeyUp) {
+        if(s->phase == PhaseStatistics) {
+            /* Scroll up - at top wrap to bottom */
+            if(s->stat_scroll == 0) {
+                s->stat_scroll = STAT_MAX_SCROLL;
+            } else {
+                s->stat_scroll--;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhasePlayerTurn) {
             game_player_double_down(s);
             view_commit_model(app->view, true);
@@ -818,10 +1038,29 @@ static bool input_callback(InputEvent* event, void* context) {
         }
     }
     if(event->key == InputKeyDown) {
-        if(s->phase == PhasePlayerTurn) {
+        if(s->phase == PhaseStatistics) {
+            /* Scroll down - at bottom wrap to top */
+            if(s->stat_scroll >= STAT_MAX_SCROLL) {
+                s->stat_scroll = 0;
+            } else {
+                s->stat_scroll++;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseSplitPrompt) {
+            /* Accept split */
             game_player_split(s);
             view_commit_model(app->view, true);
             return true;
+        }
+        if(s->phase == PhasePlayerTurn) {
+            /* Allow split from player turn if still available */
+            if(s->can_split) {
+                s->phase = PhaseSplitPrompt;
+                view_commit_model(app->view, true);
+                return true;
+            }
         }
     }
     view_commit_model(app->view, false);

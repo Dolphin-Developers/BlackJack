@@ -3,10 +3,13 @@
 ## v0.3
 
 - Added statistics tracking: Win/loss/push counts and win rate percentage
-- Statistics window accessible from result screen (Right button)
+- Statistics window accessible from result screen (Right button); scrollable (Up/Down, loops)
 - Double down feature: Double bet on first 2 cards, draw one card, then stand (Up button)
-- Split pairs: Split pairs into two hands, play sequentially (Down button)
-- Help screen: Accessible via Right button during play, shows all controls
+- Split pairs: Split pairs into two hands, play sequentially; prompt "Split Pair?" (Down=Yes, Back=No)
+- Split display: Player cards shown as text during split to avoid overlap; dealer cards remain graphical
+- 3-deck shoe: Game uses 156 cards; burn top card and bottom 20; reshuffle announced in result-style box
+- Soft/hard totals: Hand totals show "X or Y" for hands with aces when both values apply
+- Help screen: Accessible via Right button during play; enlarged box; no footer (Back to return)
 - UI improvements: Larger result box (40px height) to accommodate split hand results
 - Footer simplified to one line with abbreviated controls (K=Hit BK=Stand R=Help)
 - Card positions adjusted to avoid footer collision
