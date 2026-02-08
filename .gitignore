@@ -1,0 +1,17 @@
+# Build outputs
+dist/
+*.fap
+*.elf
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# uFBT
+.ufbt/
+
+# OS
+.DS_Store
+Thumbs.db

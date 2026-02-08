@@ -1,0 +1,15 @@
+# For details & more options, see documentation/AppManifests.md in firmware repo
+
+App(
+    appid="blackjack",
+    name="Blackjack",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="blackjack_app",
+    stack_size=4 * 1024,
+    fap_category="Games",
+    fap_version="0.1",
+    fap_icon="blackjack.png",
+    fap_description="Classic Blackjack vs the dealer. Hit or Stand.",
+    fap_author="Flipper Community",
+    fap_weburl="",
+)
