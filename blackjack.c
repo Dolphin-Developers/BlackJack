@@ -11,17 +11,24 @@
 #include <string.h>
 
 #define TAG "blackjack"
-#define MAX_HAND 12
+#define MAX_HAND 6
 #define DECK_SIZE 52
 #define CARD_VALUE(c) ((c) % 13)   /* 0=2, 1=3, ..., 9=10, 10=J, 11=Q, 12=K, (12 or 0 for A in rank) */
 #define CARD_SUIT(c) ((c) / 13)    /* 0=S, 1=H, 2=D, 3=C */
 
 typedef enum {
+    PhaseBetting,
     PhaseDeal,
     PhasePlayerTurn,
     PhaseDealerTurn,
+    PhaseShowFinalCards,
     PhaseResult
 } GamePhase;
+
+#define STARTING_BALANCE 3125
+#define MIN_BET 5
+#define MAX_BET 500
+#define BET_INCREMENT 5
 
 typedef struct {
     uint8_t deck[DECK_SIZE];
@@ -32,7 +39,10 @@ typedef struct {
     uint8_t dealer_count;
     bool dealer_hole; /* first dealer card hidden until stand */
     GamePhase phase;
-    char result_msg[24];
+    char result_msg[32];
+    uint16_t balance; /* player balance in dollars */
+    uint16_t current_bet; /* current bet amount */
+    bool is_blackjack; /* true if player got blackjack */
 } BlackjackState;
 
 /* Best hand value (Ace 1 or 11). Returns 0-31; >21 is bust. */
@@ -80,14 +90,70 @@ static char card_suit_char(uint8_t card) {
     return suits[card / 13];
 }
 
-static void game_new_round(BlackjackState* s) {
+/* Draw a card graphic (16x22px) - cards overlap, black with white text */
+static void draw_card_graphic(Canvas* canvas, int x, int y, uint8_t card, bool hidden) {
+    if(hidden) {
+        /* Draw card back (filled rectangle) */
+        canvas_draw_box(canvas, x, y, 16, 22);
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_dot(canvas, x + 3, y + 5);
+        canvas_draw_dot(canvas, x + 12, y + 16);
+        canvas_set_color(canvas, ColorBlack);
+    } else {
+        /* Draw card front (filled black rectangle) */
+        canvas_draw_box(canvas, x, y, 16, 22);
+        /* Draw rank and suit together in white */
+        canvas_set_color(canvas, ColorWhite);
+        canvas_set_font(canvas, FontPrimary);
+        char card_str[4];
+        snprintf(card_str, sizeof(card_str), "%s%c", card_rank_str(card), card_suit_char(card));
+        canvas_draw_str(canvas, x + 2, y + 14, card_str);
+        canvas_set_color(canvas, ColorBlack);
+    }
+}
+
+/* Draw chip stack that grows with bet amount (1 chip per $25) */
+static void draw_chip_stack(Canvas* canvas, int x, int y, uint16_t bet_amount) {
+    uint8_t chip_count = (bet_amount / 25) + 1; /* At least 1 chip, +1 per $25 */
+    if(chip_count > 8) chip_count = 8; /* Max 8 chips visible */
+    
+    for(uint8_t i = 0; i < chip_count; i++) {
+        int chip_x = x + (i * 6); /* Space chips 6px apart */
+        /* Draw overlapping circles to show stack */
+        canvas_draw_circle(canvas, chip_x, y, 4);
+        canvas_draw_circle(canvas, chip_x, y + 1, 4);
+        canvas_draw_circle(canvas, chip_x, y + 2, 4);
+        /* Add center dot */
+        canvas_draw_dot(canvas, chip_x, y + 1);
+    }
+}
+
+/* Forward declarations */
+static void game_deal_cards(BlackjackState* s);
+
+static void game_start_betting(BlackjackState* s) {
+    s->phase = PhaseBetting;
+    s->current_bet = MIN_BET;
+    if(s->current_bet > s->balance) {
+        s->current_bet = (s->balance < MIN_BET) ? 0 : s->balance;
+    }
+    s->result_msg[0] = '\0';
+    s->is_blackjack = false;
+}
+
+static void game_place_bet(BlackjackState* s) {
+    if(s->current_bet == 0 || s->current_bet > s->balance) return;
+    s->balance -= s->current_bet;
+    game_deal_cards(s);
+}
+
+static void game_deal_cards(BlackjackState* s) {
     shuffle_deck(s->deck);
     s->deck_top = 0;
     s->player_count = 0;
     s->dealer_count = 0;
     s->dealer_hole = true;
     s->phase = PhaseDeal;
-    s->result_msg[0] = '\0';
 
     s->player_hand[s->player_count++] = draw_card(s);
     s->dealer_hand[s->dealer_count++] = draw_card(s);
@@ -96,26 +162,46 @@ static void game_new_round(BlackjackState* s) {
 
     uint8_t pv = hand_value(s->player_hand, s->player_count);
     if(pv == 21) {
+        s->is_blackjack = true;
         s->dealer_hole = false;
+        s->phase = PhaseShowFinalCards;
         uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
-        if(dv == 21)
-            strncpy(s->result_msg, "Push.", sizeof(s->result_msg) - 1);
-        else
-            strncpy(s->result_msg, "Blackjack! You win!", sizeof(s->result_msg) - 1);
+        if(dv == 21) {
+            s->balance += s->current_bet; /* return bet on push */
+            snprintf(s->result_msg, sizeof(s->result_msg), "Push. +$%u", s->current_bet);
+        } else {
+            /* Blackjack pays 3:2 */
+            uint16_t payout = s->current_bet + (s->current_bet * 3 / 2);
+            s->balance += payout;
+            snprintf(s->result_msg, sizeof(s->result_msg), "Blackjack! +$%u", payout);
+        }
         s->result_msg[sizeof(s->result_msg) - 1] = '\0';
-        s->phase = PhaseResult;
     } else {
         s->phase = PhasePlayerTurn;
     }
 }
 
+static void game_new_round(BlackjackState* s) {
+    if(s->balance == 0) {
+        /* Reset balance if broke */
+        s->balance = STARTING_BALANCE;
+    }
+    game_start_betting(s);
+}
+
 static void game_player_hit(BlackjackState* s) {
     if(s->phase != PhasePlayerTurn || s->player_count >= MAX_HAND) return;
     s->player_hand[s->player_count++] = draw_card(s);
-    if(hand_value(s->player_hand, s->player_count) > 21) {
-        s->phase = PhaseResult;
-        strncpy(s->result_msg, "Bust! Dealer wins.", sizeof(s->result_msg) - 1);
-        s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+    uint8_t pv = hand_value(s->player_hand, s->player_count);
+    if(pv > 21) {
+        s->dealer_hole = false; /* Show dealer cards */
+        s->phase = PhaseShowFinalCards;
+        /* Result will be calculated in game_show_result */
+    } else if(s->player_count == MAX_HAND) {
+        /* Player wins with 6 cards without busting */
+        s->dealer_hole = false; /* Show dealer cards */
+        s->phase = PhaseShowFinalCards;
+        /* Result will be calculated in game_show_result */
     }
 }
 
@@ -128,17 +214,47 @@ static void game_player_stand(BlackjackState* s) {
     while(dv < 17 && s->dealer_count < MAX_HAND) {
         s->dealer_hand[s->dealer_count++] = draw_card(s);
         dv = hand_value(s->dealer_hand, s->dealer_count);
+        /* Dealer busts if they draw 6 cards without winning */
+        if(s->dealer_count == MAX_HAND && dv <= 21) {
+            /* Dealer has 6 cards but didn't win - they bust */
+            dv = 22; /* Force bust condition */
+            break;
+        }
     }
 
+    /* Show final cards before result */
+    s->phase = PhaseShowFinalCards;
+}
+
+static void game_show_result(BlackjackState* s) {
     uint8_t pv = hand_value(s->player_hand, s->player_count);
-    if(dv > 21) {
-        strncpy(s->result_msg, "Dealer bust! You win!", sizeof(s->result_msg) - 1);
+    uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+    
+    if(pv > 21) {
+        /* Player busted */
+        snprintf(s->result_msg, sizeof(s->result_msg), "Bust! -$%u", s->current_bet);
+    } else if(s->player_count == MAX_HAND) {
+        /* Player wins with 6 cards */
+        uint16_t payout = s->current_bet * 2;
+        s->balance += payout;
+        snprintf(s->result_msg, sizeof(s->result_msg), "6 cards! +$%u", payout);
+    } else if(dv > 21) {
+        uint16_t payout = s->current_bet * 2;
+        s->balance += payout;
+        if(s->dealer_count == MAX_HAND) {
+            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer 6 cards! +$%u", payout);
+        } else {
+            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer bust! +$%u", payout);
+        }
     } else if(pv > dv) {
-        strncpy(s->result_msg, "You win!", sizeof(s->result_msg) - 1);
+        uint16_t payout = s->current_bet * 2;
+        s->balance += payout;
+        snprintf(s->result_msg, sizeof(s->result_msg), "You win! +$%u", payout);
     } else if(pv < dv) {
-        strncpy(s->result_msg, "Dealer wins.", sizeof(s->result_msg) - 1);
+        snprintf(s->result_msg, sizeof(s->result_msg), "Dealer wins. -$%u", s->current_bet);
     } else {
-        strncpy(s->result_msg, "Push.", sizeof(s->result_msg) - 1);
+        s->balance += s->current_bet; /* return bet on push */
+        snprintf(s->result_msg, sizeof(s->result_msg), "Push. +$%u", s->current_bet);
     }
     s->result_msg[sizeof(s->result_msg) - 1] = '\0';
     s->phase = PhaseResult;
@@ -149,51 +265,124 @@ static void draw_callback(Canvas* canvas, void* model) {
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
 
-    if(s->phase == PhaseDeal || s->phase == PhasePlayerTurn || s->phase == PhaseDealerTurn || s->phase == PhaseResult) {
-        canvas_draw_str(canvas, 0, 8, "D:");
-        int x = 14;
+    /* Always show balance at top */
+    char bal_buf[16];
+    snprintf(bal_buf, sizeof(bal_buf), "$%u", s->balance);
+    canvas_draw_str(canvas, 0, 10, bal_buf);
+
+    if(s->phase == PhaseBetting) {
+        /* Betting phase - more space for bet amount and chips */
+        canvas_set_font(canvas, FontPrimary);
+        char bet_buf[20];
+        snprintf(bet_buf, sizeof(bet_buf), "Bet: $%u", s->current_bet);
+        canvas_draw_str(canvas, 0, 28, bet_buf);
+        /* Draw chip stack that grows with bet amount - positioned after bet text */
+        int chip_x = canvas_string_width(canvas, bet_buf) + 8;
+        draw_chip_stack(canvas, chip_x, 24, s->current_bet);
+        /* Help text in footer - double stacked with more spacing */
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 0, 54, "Left/Right=Adjust");
+        canvas_draw_str(canvas, 0, 62, "OK=Deal  Back=Exit");
+    } else if(s->phase == PhaseDeal || s->phase == PhasePlayerTurn || s->phase == PhaseDealerTurn || s->phase == PhaseShowFinalCards || s->phase == PhaseResult) {
+        /* Show bet amount on right side */
+        canvas_set_font(canvas, FontSecondary);
+        char bet_buf[20];
+        snprintf(bet_buf, sizeof(bet_buf), "Bet:$%u", s->current_bet);
+        int bet_width = canvas_string_width(canvas, bet_buf);
+        canvas_draw_str(canvas, 128 - bet_width, 10, bet_buf);
+
+        /* Draw dealer cards - left side, overlay cards 3+ on bottom half */
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 0, 26, "D:");
+        int card_x = 18;
+        int card_y = 18;
         for(uint8_t i = 0; i < s->dealer_count; i++) {
-            if(i == 0 && s->dealer_hole) {
-                canvas_draw_str(canvas, x, 8, "??");
+            int col = i % 2; /* Column: 0 or 1 */
+            int x = card_x + (col * 18); /* 16px card + 2px gap = 18px */
+            int y;
+            if(i < 2) {
+                /* First two cards: normal position */
+                int row = i / 2; /* Row: 0 or 1 */
+                y = card_y + (row * 24); /* 22px card + 2px gap = 24px */
             } else {
-                char buf[4];
-                snprintf(buf, sizeof(buf), "%s%c", card_rank_str(s->dealer_hand[i]), card_suit_char(s->dealer_hand[i]));
-                canvas_draw_str(canvas, x, 8, buf);
+                /* Cards 3+: overlay on bottom half of card above */
+                int base_row = (i - 2) / 2; /* Which pair of cards (0, 1, 2) */
+                int base_y = card_y + (base_row * 24);
+                y = base_y + 11; /* Overlay on bottom half (card is 22px, so +11px) */
             }
-            x += 22;
+            draw_card_graphic(canvas, x, y, s->dealer_hand[i], (i == 0 && s->dealer_hole));
         }
+        /* Draw dealer hand value directly underneath "D:" label */
         if(!s->dealer_hole && s->dealer_count > 0) {
             uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
             char vbuf[8];
-            snprintf(vbuf, sizeof(vbuf), "(%u)", dv);
-            canvas_draw_str(canvas, x, 8, vbuf);
+            snprintf(vbuf, sizeof(vbuf), "%u", dv);
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str(canvas, 0, 34, vbuf);
         }
 
-        canvas_draw_str(canvas, 0, 22, "P:");
-        x = 14;
+        /* Draw player cards - right side, overlay cards 3+ on bottom half */
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 54, 26, "P:"); /* Moved left to avoid covering first card */
+        card_x = 70; /* Start on right side */
+        card_y = 18;
         for(uint8_t i = 0; i < s->player_count; i++) {
-            char buf[4];
-            snprintf(buf, sizeof(buf), "%s%c", card_rank_str(s->player_hand[i]), card_suit_char(s->player_hand[i]));
-            canvas_draw_str(canvas, x, 22, buf);
-            x += 22;
+            int col = i % 2; /* Column: 0 or 1 */
+            int x = card_x + (col * 18); /* 16px card + 2px gap = 18px */
+            int y;
+            if(i < 2) {
+                /* First two cards: normal position */
+                int row = i / 2; /* Row: 0 or 1 */
+                y = card_y + (row * 24); /* 22px card + 2px gap = 24px */
+            } else {
+                /* Cards 3+: overlay on bottom half of card above */
+                int base_row = (i - 2) / 2; /* Which pair of cards (0, 1, 2) */
+                int base_y = card_y + (base_row * 24);
+                y = base_y + 11; /* Overlay on bottom half (card is 22px, so +11px) */
+            }
+            draw_card_graphic(canvas, x, y, s->player_hand[i], false);
         }
+        /* Draw player hand value directly underneath "P:" label */
         uint8_t pv = hand_value(s->player_hand, s->player_count);
         char vbuf[8];
-        snprintf(vbuf, sizeof(vbuf), " (%u)", pv);
-        canvas_draw_str(canvas, x, 22, vbuf);
-    }
+        snprintf(vbuf, sizeof(vbuf), "%u", pv);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 54, 34, vbuf);
 
-    if(s->phase == PhasePlayerTurn) {
+        /* Help text in footer */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 42, "OK=Hit  Back=Stand");
-    } else if(s->phase == PhaseResult) {
-        canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 0, 42, s->result_msg);
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 54, "OK=New game  Back=Exit");
-    } else if(s->phase == PhaseDeal) {
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 42, "OK=New game  Back=Exit");
+        if(s->phase == PhasePlayerTurn) {
+            canvas_draw_str(canvas, 0, 62, "OK=Hit  Back=Stand");
+        } else if(s->phase == PhaseShowFinalCards) {
+            canvas_draw_str(canvas, 0, 62, "OK=Show Result");
+        } else if(s->phase == PhaseResult) {
+            /* Draw result box overlay - white box with black outline */
+            int box_x = 20;
+            int box_y = 20;
+            int box_w = 88;
+            int box_h = 28;
+            /* White box */
+            canvas_set_color(canvas, ColorWhite);
+            canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
+            /* Black outline */
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
+            /* Result text inside box */
+            canvas_set_font(canvas, FontPrimary);
+            uint8_t pv_final = hand_value(s->player_hand, s->player_count);
+            uint8_t dv_final = hand_value(s->dealer_hand, s->dealer_count);
+            char result_text[32];
+            snprintf(result_text, sizeof(result_text), "P:%u D:%u", pv_final, dv_final);
+            int text_x = box_x + (box_w - canvas_string_width(canvas, result_text)) / 2;
+            canvas_draw_str(canvas, text_x, box_y + 10, result_text);
+            /* Result message centered */
+            int msg_x = box_x + (box_w - canvas_string_width(canvas, s->result_msg)) / 2;
+            canvas_draw_str(canvas, msg_x, box_y + 22, s->result_msg);
+            /* Footer instructions */
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str(canvas, 0, 56, "Left=Change Bet");
+            canvas_draw_str(canvas, 0, 62, "OK=Bet Again  Back=Exit");
+        }
     }
 }
 
@@ -210,7 +399,7 @@ static bool input_callback(InputEvent* event, void* context) {
     if(!s) return false;
 
     if(event->key == InputKeyBack) {
-        if(s->phase == PhaseResult || s->phase == PhaseDeal) {
+        if(s->phase == PhaseResult || s->phase == PhaseBetting) {
             view_commit_model(app->view, false);
             view_dispatcher_stop(app->view_dispatcher);
             return true;
@@ -224,13 +413,51 @@ static bool input_callback(InputEvent* event, void* context) {
         return false;
     }
     if(event->key == InputKeyOk) {
-        if(s->phase == PhaseResult || s->phase == PhaseDeal) {
-            game_new_round(s);
+        if(s->phase == PhaseBetting) {
+            game_place_bet(s);
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseShowFinalCards) {
+            game_show_result(s);
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseResult) {
+            /* Bet Again - deal new hand with same bet */
+            game_deal_cards(s);
             view_commit_model(app->view, true);
             return true;
         }
         if(s->phase == PhasePlayerTurn) {
             game_player_hit(s);
+            view_commit_model(app->view, true);
+            return true;
+        }
+    }
+    if(event->key == InputKeyLeft) {
+        if(s->phase == PhaseBetting) {
+            if(s->current_bet > MIN_BET) {
+                s->current_bet -= BET_INCREMENT;
+                if(s->current_bet < MIN_BET) s->current_bet = MIN_BET;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseResult) {
+            /* Change Bet - go back to betting screen */
+            game_start_betting(s);
+            view_commit_model(app->view, true);
+            return true;
+        }
+    }
+    if(event->key == InputKeyRight) {
+        if(s->phase == PhaseBetting) {
+            uint16_t max_bet = (s->balance < MAX_BET) ? s->balance : MAX_BET;
+            if(s->current_bet < max_bet) {
+                s->current_bet += BET_INCREMENT;
+                if(s->current_bet > max_bet) s->current_bet = max_bet;
+            }
             view_commit_model(app->view, true);
             return true;
         }
@@ -254,6 +481,8 @@ int32_t blackjack_app(void* p) {
     view_set_input_callback(app->view, input_callback);
 
     BlackjackState* state = (BlackjackState*)view_get_model(app->view);
+    state->balance = STARTING_BALANCE;
+    state->current_bet = 0;
     game_new_round(state);
     view_commit_model(app->view, true);
 
