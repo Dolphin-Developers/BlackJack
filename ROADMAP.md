@@ -149,14 +149,18 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 - [x] **Double down**: Allow double on initial two cards (one card only). (Up button.)
 - [x] **Split**: Split pairs; prompt "Split Pair?"; play two hands; player cards as text during split.
 - [x] **Chips/betting**: Virtual chips and bet-before-deal ($3,125 start, $5–$500).
+- [x] **Splash menu**: Continue (last profile), New profile, Guest game, Practice mode, Help.
+- [x] **Player profiles**: Up to 4 saved profiles (bank + stats) on SD; last-used remembered.
+- [x] **Guest game**: Play without profile; "Save to profile?" when leaving (Back from Bet/Result).
+- [x] **Practice mode**: Wizard of Odds basic strategy hints during player turn and split prompt.
 - [ ] **Settings**: Optional sound on/off or dealer rules (future).
 
 ### Phase 4 — Catalog submission
 
 - [ ] **Screenshot**: Take at least one with qFlipper → `screenshots/ss0.png` (required).
-- [x] Finalize `application.fam` and repo (icon, README, changelog; version 0.3).
-- [ ] Fork [flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog), create branch (e.g. `username_blackjack_0.3`).
-- [ ] Add `applications/Games/blackjack/manifest.yml` with `sourcecode`, `screenshots`, `changelog`, `description`, `short_description`, `name`, `id`, `category`, `version` (0.3).
+- [x] Finalize `application.fam` and repo (icon, README, changelog; version 0.4).
+- [ ] Fork [flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog), create branch (e.g. `username_blackjack_0.4`).
+- [ ] Add `applications/Games/blackjack/manifest.yml` with `sourcecode`, `screenshots`, `changelog`, `description`, `short_description`, `name`, `id`, `category`, `version` (0.4).
 - [ ] Run catalog validation: `python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundle.zip`.
 - [ ] Open PR, fill template, respond to review within 14 days if asked for changes.
 

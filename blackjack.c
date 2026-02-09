@@ -7,6 +7,7 @@
 #include <gui/gui.h>
 #include <gui/view.h>
 #include <gui/view_dispatcher.h>
+#include <storage/storage.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,8 @@
 #define CARD_RANK(c) ((c) % 13)    /* Get card rank (0-12) for pair detection */
 
 typedef enum {
+    PhaseSplash,
+    PhaseProfileMenu,
     PhaseBetting,
     PhaseDeal,
     PhasePlayerTurn,
@@ -32,13 +35,21 @@ typedef enum {
     PhaseResult,
     PhaseStatistics,
     PhaseHelp,
-    PhaseReshuffle
+    PhaseReshuffle,
+    PhaseGuestSavePrompt,  /* Guest: Save to profile? Yes/No */
+    PhaseGuestPickProfile  /* Guest: pick slot to save to */
 } GamePhase;
 
 #define STARTING_BALANCE 3125
 #define MIN_BET 5
 #define MAX_BET 500
 #define BET_INCREMENT 5
+#define MAX_PROFILES 4
+#define PROFILE_NAME_LEN 17
+#define BLACKJACK_PROFILES_PATH EXT_PATH("apps_data/blackjack/profiles.dat")
+#define BLACKJACK_LAST_USED_PATH EXT_PATH("apps_data/blackjack/last_used")
+#define PROFILES_FILE_MAGIC "BJ1"
+#define SPLASH_OPTIONS 5  /* Continue, New profile, Guest, Practice, Help */
 
 typedef struct {
     uint8_t deck[DECK_SIZE];
@@ -69,6 +80,12 @@ typedef struct {
     uint16_t games_lost;
     uint16_t games_pushed;
     uint8_t stat_scroll; /* Scroll offset for stats menu (0 = top, loops) */
+    uint8_t profile_menu_selection;
+    uint8_t current_profile_slot;
+    char profile_names[MAX_PROFILES][PROFILE_NAME_LEN];
+    uint8_t splash_selection;   /* 0=Continue, 1=New, 2=Guest, 3=Practice, 4=Help */
+    bool is_guest;
+    bool practice_mode;
 } BlackjackState;
 
 #define STAT_LINES 5   /* Games, Wins, Losses, Pushes, Win Rate */
@@ -112,6 +129,44 @@ static void hand_values_soft_hard(const uint8_t* hand, uint8_t count, uint8_t* s
         *soft -= 10;
         aces--;
     }
+}
+
+/* Wizard of Odds basic strategy hint (simplified). Returns recommended action. */
+static const char* wizard_strategy_hint(const uint8_t* hand, uint8_t count, uint8_t dealer_card, bool can_double, bool can_split) {
+    uint8_t total = hand_value(hand, count);
+    uint8_t soft = 0, hard = 0;
+    hand_values_soft_hard(hand, count, &soft, &hard);
+    bool is_soft = (soft != hard && soft <= 21);
+    bool is_pair = (count == 2 && CARD_RANK(hand[0]) == CARD_RANK(hand[1]));
+    uint8_t r = dealer_card % 13;
+    int d = (r >= 8 && r <= 11) ? 10 : (r == 12) ? 11 : (r + 2);
+    if(is_pair && can_split) {
+        if(CARD_RANK(hand[0]) == 12) return "Split";   /* A,A */
+        if(CARD_RANK(hand[0]) == 9) return "Split";    /* 10,10 - no, stand. 9,9 vs 2-9,7: split */
+        if(CARD_RANK(hand[0]) == 8) return "Split";   /* 8,8 */
+        if(CARD_RANK(hand[0]) == 7 && d <= 7) return "Split";
+        if(CARD_RANK(hand[0]) == 6 && d <= 6) return "Split";
+        if(CARD_RANK(hand[0]) == 3 && d <= 7) return "Split";
+        if(CARD_RANK(hand[0]) == 2 && d <= 7) return "Split";
+    }
+    if(is_soft) {
+        if(soft >= 19) return "Stand";
+        if(soft == 18 && d >= 9) return "Hit";
+        if(soft == 18 && d <= 8) return "Stand";
+        if(soft == 17 && d >= 3 && can_double) return "Double";
+        if(soft >= 15 && soft <= 17 && d >= 4 && d <= 6 && can_double) return "Double";
+        if(soft >= 13 && soft <= 17) return "Hit";
+        return "Hit";
+    }
+    if(total >= 17) return "Stand";
+    if(total >= 13 && total <= 16 && d <= 6) return "Stand";
+    if(total == 12 && d >= 4 && d <= 6) return "Stand";
+    if(total == 11 && can_double) return "Double";
+    if(total == 10 && d <= 9 && can_double) return "Double";
+    if(total == 9 && d >= 3 && d <= 6 && can_double) return "Double";
+    if(total <= 11) return "Hit";
+    if(total >= 12 && d >= 7) return "Hit";
+    return "Stand";
 }
 
 static void shuffle_deck(uint8_t* deck) {
@@ -199,6 +254,161 @@ static void game_deal_cards(BlackjackState* s);
 static void game_player_stand(BlackjackState* s);
 static void game_player_split(BlackjackState* s);
 
+#pragma pack(push, 1)
+typedef struct {
+    char name[PROFILE_NAME_LEN];
+    uint16_t balance;
+    uint16_t games_played;
+    uint16_t games_won;
+    uint16_t games_lost;
+    uint16_t games_pushed;
+} ProfileRecord;
+#pragma pack(pop)
+
+static void profile_ensure_dir(Storage* storage) {
+    storage_simply_mkdir(storage, EXT_PATH("apps_data"));
+    storage_simply_mkdir(storage, EXT_PATH("apps_data/blackjack"));
+}
+
+static void profile_load_list(Storage* storage, BlackjackState* s) {
+    for(uint8_t i = 0; i < MAX_PROFILES; i++) {
+        snprintf(s->profile_names[i], PROFILE_NAME_LEN, "Slot %u", (unsigned)(i + 1));
+    }
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_PROFILES_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(file);
+        return;
+    }
+    char magic[4];
+    if(storage_file_read(file, magic, 4) != 4 || memcmp(magic, PROFILES_FILE_MAGIC, 4) != 0) {
+        storage_file_close(file);
+        storage_file_free(file);
+        return;
+    }
+    ProfileRecord rec;
+    for(uint8_t i = 0; i < MAX_PROFILES; i++) {
+        if(storage_file_read(file, &rec, sizeof(rec)) != sizeof(rec)) break;
+        rec.name[PROFILE_NAME_LEN - 1] = '\0';
+        if(rec.name[0] != '\0') {
+            strncpy(s->profile_names[i], rec.name, PROFILE_NAME_LEN - 1);
+            s->profile_names[i][PROFILE_NAME_LEN - 1] = '\0';
+        }
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+}
+
+static void profile_load_slot(Storage* storage, BlackjackState* s, uint8_t slot) {
+    if(slot >= MAX_PROFILES) return;
+    s->current_profile_slot = slot;
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_PROFILES_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(file);
+        s->balance = STARTING_BALANCE;
+        s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+        return;
+    }
+    storage_file_seek(file, 4 + (uint32_t)slot * sizeof(ProfileRecord), true);
+    ProfileRecord rec;
+    if(storage_file_read(file, &rec, sizeof(rec)) != sizeof(rec)) {
+        storage_file_close(file);
+        storage_file_free(file);
+        s->balance = STARTING_BALANCE;
+        s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+        return;
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+    s->balance = rec.balance;
+    s->games_played = rec.games_played;
+    s->games_won = rec.games_won;
+    s->games_lost = rec.games_lost;
+    s->games_pushed = rec.games_pushed;
+    if(s->balance == 0) s->balance = STARTING_BALANCE;
+}
+
+static uint8_t profile_load_last_used(Storage* storage) {
+    File* file = storage_file_alloc(storage);
+    uint8_t slot = 0;
+    if(storage_file_open(file, BLACKJACK_LAST_USED_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        if(storage_file_read(file, &slot, 1) == 1 && slot < MAX_PROFILES) { /* valid */ }
+        else slot = 0;
+        storage_file_close(file);
+    }
+    storage_file_free(file);
+    return slot;
+}
+
+static void profile_save_last_used(Storage* storage, uint8_t slot) {
+    if(slot >= MAX_PROFILES) return;
+    profile_ensure_dir(storage);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, BLACKJACK_LAST_USED_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_write(file, &slot, 1);
+        storage_file_sync(file);
+        storage_file_close(file);
+    }
+    storage_file_free(file);
+}
+
+static void profile_save_current(Storage* storage, BlackjackState* s) {
+    profile_ensure_dir(storage);
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_PROFILES_PATH, FSAM_READ_WRITE, FSOM_OPEN_ALWAYS)) {
+        storage_file_free(file);
+        return;
+    }
+    uint64_t size = storage_file_size(file);
+    if(size < 4) {
+        storage_file_seek(file, 0, true);
+        storage_file_write(file, PROFILES_FILE_MAGIC, 4);
+        for(uint8_t i = 0; i < MAX_PROFILES; i++) {
+            ProfileRecord rec = { .name = {0}, .balance = 0, .games_played = 0, .games_won = 0, .games_lost = 0, .games_pushed = 0 };
+            storage_file_write(file, &rec, sizeof(rec));
+        }
+        storage_file_sync(file);
+    }
+    ProfileRecord rec;
+    memset(rec.name, 0, sizeof(rec.name));
+    strncpy(rec.name, s->profile_names[s->current_profile_slot], PROFILE_NAME_LEN - 1);
+    rec.balance = s->balance;
+    rec.games_played = s->games_played;
+    rec.games_won = s->games_won;
+    rec.games_lost = s->games_lost;
+    rec.games_pushed = s->games_pushed;
+    storage_file_seek(file, 4 + (uint32_t)s->current_profile_slot * sizeof(ProfileRecord), true);
+    storage_file_write(file, &rec, sizeof(rec));
+    storage_file_sync(file);
+    storage_file_close(file);
+    storage_file_free(file);
+    profile_save_last_used(storage, s->current_profile_slot);
+}
+
+static void profile_save_guest_to_slot(Storage* storage, BlackjackState* s, uint8_t slot) {
+    if(slot >= MAX_PROFILES) return;
+    profile_ensure_dir(storage);
+    profile_load_list(storage, s);
+    if(s->profile_names[slot][0] == '\0') {
+        snprintf(s->profile_names[slot], PROFILE_NAME_LEN, "Player %u", (unsigned)(slot + 1));
+    }
+    s->current_profile_slot = slot;
+    profile_save_current(storage, s);
+}
+
+static void profile_create_new(BlackjackState* s) {
+    uint8_t slot = 0;
+    if(s->profile_names[0][0] != '\0') {
+        for(slot = 1; slot < MAX_PROFILES; slot++) {
+            if(s->profile_names[slot][0] == '\0') break;
+        }
+        if(slot >= MAX_PROFILES) slot = 0;
+    }
+    s->current_profile_slot = slot;
+    snprintf(s->profile_names[slot], PROFILE_NAME_LEN, "Player %u", (unsigned)(slot + 1));
+    s->balance = STARTING_BALANCE;
+    s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+}
+
 static void game_start_betting(BlackjackState* s) {
     s->phase = PhaseBetting;
     s->current_bet = MIN_BET;
@@ -254,6 +464,7 @@ static void game_deal_cards(BlackjackState* s) {
 
     uint8_t pv = hand_value(s->player_hand, s->player_count);
     if(pv == 21) {
+        /* Player blackjack - reveal dealer and resolve */
         s->is_blackjack = true;
         s->dealer_hole = false;
         s->phase = PhaseShowFinalCards;
@@ -269,25 +480,32 @@ static void game_deal_cards(BlackjackState* s) {
         }
         s->result_msg[sizeof(s->result_msg) - 1] = '\0';
     } else {
-        /* Check if player can split */
+        /* Dealer peek: when up card is 10 or Ace, check for dealer blackjack (Wizard of Odds standard) */
+        uint8_t dealer_up_rank = s->dealer_hand[1] % 13; /* Up card is second card: 9=10, 10=J, 11=Q, 12=K/A */
+        bool dealer_has_10_or_ace = (dealer_up_rank >= 9);
+        if(dealer_has_10_or_ace) {
+            uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+            if(dv == 21) {
+                /* Dealer blackjack - end hand immediately; player loses (no hit/double/split) */
+                s->dealer_hole = false;
+                s->games_played++;
+                s->games_lost++;
+                snprintf(s->result_msg, sizeof(s->result_msg), "Dealer blackjack. -$%u", s->current_bet);
+                s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+                s->phase = PhaseResult;
+                return;
+            }
+        }
+        /* No dealer blackjack - check if player can split */
         bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
         s->can_split = (is_pair && (s->balance >= s->current_bet));
         if(s->can_split) {
             s->phase = PhaseSplitPrompt;
         } else {
             s->phase = PhasePlayerTurn;
-            /* Can double down if player has exactly 2 cards and enough balance to double bet */
             s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
         }
     }
-}
-
-static void game_new_round(BlackjackState* s) {
-    if(s->balance == 0) {
-        /* Reset balance if broke */
-        s->balance = STARTING_BALANCE;
-    }
-    game_start_betting(s);
 }
 
 static void game_player_hit(BlackjackState* s) {
@@ -336,7 +554,7 @@ static void game_player_double_down(BlackjackState* s) {
     uint8_t* count = (s->is_split && s->active_hand == 1) ? &s->player_count2 : &s->player_count;
     uint16_t* bet = (s->is_split && s->active_hand == 1) ? &s->bet_hand2 : &s->current_bet;
     
-    /* Double the bet */
+    if(*count != 2) return;
     if(s->balance >= *bet) {
         s->balance -= *bet;
         *bet *= 2;
@@ -552,7 +770,83 @@ static void draw_callback(Canvas* canvas, void* model) {
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
 
-    /* Always show balance at top */
+    if(s->phase == PhaseSplash) {
+        int box_x = 2;
+        int box_y = 0;
+        int box_w = 124;
+        int box_h = 64;
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
+        canvas_set_font(canvas, FontPrimary);
+        const char* title = "BLACKJACK";
+        int title_w = canvas_string_width(canvas, title);
+        canvas_draw_str(canvas, box_x + (box_w - title_w) / 2, box_y + 10, title);
+        canvas_set_font(canvas, FontSecondary);
+        static const char* const splash_opts[SPLASH_OPTIONS] = {
+            "Continue (last profile)",
+            "New profile",
+            "Guest game",
+            "Practice mode",
+            "Help"
+        };
+        const int line_h = 9;
+        for(uint8_t i = 0; i < SPLASH_OPTIONS; i++) {
+            int y = box_y + 18 + (int)i * line_h;
+            if(i == s->splash_selection) canvas_draw_str(canvas, box_x + 2, y, ">");
+            canvas_draw_str(canvas, box_x + 10, y, splash_opts[i]);
+        }
+        canvas_draw_str(canvas, 0, 62, "Up/Down OK=Select Back=Exit");
+        return;
+    }
+    if(s->phase == PhaseGuestSavePrompt) {
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, 10, 18, 108, 28);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, 10, 18, 108, 28);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 18, 28, "Save to profile?");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 22, 38, s->profile_menu_selection == 0 ? "> No" : "  No");
+        canvas_draw_str(canvas, 70, 38, s->profile_menu_selection == 1 ? "> Yes" : "  Yes");
+        canvas_draw_str(canvas, 0, 62, "Up/Down OK Back=Cancel");
+        return;
+    }
+    if(s->phase == PhaseGuestPickProfile) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 0, 10, "Save to:");
+        canvas_set_font(canvas, FontSecondary);
+        const int line_h = 10;
+        for(uint8_t i = 0; i <= MAX_PROFILES; i++) {
+            int y = 20 + (int)i * line_h;
+            if((uint8_t)i == s->profile_menu_selection) canvas_draw_str(canvas, 0, y, ">");
+            if(i < MAX_PROFILES) canvas_draw_str(canvas, 8, y, s->profile_names[i]);
+            else canvas_draw_str(canvas, 8, y, "New profile");
+        }
+        canvas_draw_str(canvas, 0, 62, "Up/Down OK=Save Back=Cancel");
+        return;
+    }
+
+    if(s->phase == PhaseProfileMenu) {
+        canvas_draw_str(canvas, 0, 10, "Select Profile");
+        canvas_set_font(canvas, FontSecondary);
+        const int line_h = 10;
+        for(uint8_t i = 0; i <= MAX_PROFILES; i++) {
+            int y = 20 + (int)i * line_h;
+            if((uint8_t)i == s->profile_menu_selection) {
+                canvas_draw_str(canvas, 0, y, ">");
+            }
+            if(i < MAX_PROFILES) {
+                canvas_draw_str(canvas, 8, y, s->profile_names[i]);
+            } else {
+                canvas_draw_str(canvas, 8, y, "New profile");
+            }
+        }
+        canvas_draw_str(canvas, 0, 62, "Up/Down=Select OK=Play Back=Exit");
+        return;
+    }
+
     char bal_buf[16];
     snprintf(bal_buf, sizeof(bal_buf), "$%u", s->balance);
     canvas_draw_str(canvas, 0, 10, bal_buf);
@@ -684,7 +978,12 @@ static void draw_callback(Canvas* canvas, void* model) {
         const char* split_controls = "Down=Yes  Back=No";
         int ctrl_x = box_x + (box_w - canvas_string_width(canvas, split_controls)) / 2;
         canvas_draw_str(canvas, ctrl_x, box_y + 22, split_controls);
-        /* Footer */
+        if(s->practice_mode) {
+            const char* hint = wizard_strategy_hint(s->player_hand, 2, s->dealer_hand[1], false, true);
+            char buf[24];
+            snprintf(buf, sizeof(buf), "Strategy: %s", hint);
+            canvas_draw_str(canvas, 0, 52, buf);
+        }
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_str(canvas, 0, 62, "Down=Split Back=No");
     } else if(s->phase == PhaseDeal || s->phase == PhasePlayerTurn || s->phase == PhaseDealerTurn || s->phase == PhaseShowFinalCards || s->phase == PhaseResult) {
@@ -818,6 +1117,14 @@ static void draw_callback(Canvas* canvas, void* model) {
         /* Help text in footer - one line */
         canvas_set_font(canvas, FontSecondary);
         if(s->phase == PhasePlayerTurn) {
+            if(s->practice_mode) {
+                const uint8_t* ph = (s->is_split && s->active_hand == 1) ? s->player_hand2 : s->player_hand;
+                uint8_t pc = (s->is_split && s->active_hand == 1) ? s->player_count2 : s->player_count;
+                const char* hint = wizard_strategy_hint(ph, pc, s->dealer_hand[1], s->can_double_down, s->can_split);
+                char buf[24];
+                snprintf(buf, sizeof(buf), "Strategy: %s", hint);
+                canvas_draw_str(canvas, 0, 52, buf);
+            }
             canvas_draw_str(canvas, 0, 62, "K=Hit BK=Stand R=Help");
         } else if(s->phase == PhaseShowFinalCards) {
             canvas_draw_str(canvas, 0, 62, "K=Result R=Help");
@@ -889,9 +1196,29 @@ static bool input_callback(InputEvent* event, void* context) {
             view_commit_model(app->view, true);
             return true;
         }
-        if(s->phase == PhaseResult || s->phase == PhaseBetting) {
+        if(s->phase == PhaseSplash) {
             view_commit_model(app->view, false);
             view_dispatcher_stop(app->view_dispatcher);
+            return true;
+        }
+        if(s->phase == PhaseProfileMenu) {
+            view_commit_model(app->view, false);
+            view_dispatcher_stop(app->view_dispatcher);
+            return true;
+        }
+        if(s->phase == PhaseResult || s->phase == PhaseBetting) {
+            if(s->is_guest) {
+                s->phase = PhaseGuestSavePrompt;
+                s->profile_menu_selection = 0;  /* No */
+                view_commit_model(app->view, true);
+                return true;
+            }
+            Storage* storage = furi_record_open(RECORD_STORAGE);
+            profile_save_current(storage, s);
+            furi_record_close(RECORD_STORAGE);
+            s->phase = PhaseProfileMenu;
+            s->profile_menu_selection = 0;
+            view_commit_model(app->view, true);
             return true;
         }
         if(s->phase == PhasePlayerTurn) {
@@ -903,6 +1230,103 @@ static bool input_callback(InputEvent* event, void* context) {
         return false;
     }
     if(event->key == InputKeyOk) {
+        if(s->phase == PhaseSplash) {
+            Storage* storage = furi_record_open(RECORD_STORAGE);
+            profile_ensure_dir(storage);
+            profile_load_list(storage, s);
+            switch(s->splash_selection) {
+            case 0: /* Continue */
+                profile_load_slot(storage, s, profile_load_last_used(storage));
+                s->is_guest = false;
+                s->practice_mode = false;
+                furi_record_close(RECORD_STORAGE);
+                game_start_betting(s);
+                break;
+            case 1: /* New profile */
+                profile_create_new(s);
+                s->is_guest = false;
+                s->practice_mode = false;
+                profile_save_last_used(storage, s->current_profile_slot);
+                furi_record_close(RECORD_STORAGE);
+                game_start_betting(s);
+                break;
+            case 2: /* Guest */
+                s->balance = STARTING_BALANCE;
+                s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+                s->current_profile_slot = 0;
+                s->is_guest = true;
+                s->practice_mode = false;
+                furi_record_close(RECORD_STORAGE);
+                game_start_betting(s);
+                break;
+            case 3: /* Practice */
+                s->balance = STARTING_BALANCE;
+                s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+                s->current_profile_slot = 0;
+                s->is_guest = true;
+                s->practice_mode = true;
+                furi_record_close(RECORD_STORAGE);
+                game_start_betting(s);
+                break;
+            case 4: /* Help */
+                s->prev_phase = PhaseSplash;
+                s->phase = PhaseHelp;
+                furi_record_close(RECORD_STORAGE);
+                break;
+            default:
+                furi_record_close(RECORD_STORAGE);
+                break;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestSavePrompt) {
+            if(s->profile_menu_selection == 0) {
+                s->phase = PhaseSplash;
+                s->is_guest = false;
+            } else {
+                s->phase = PhaseGuestPickProfile;
+                s->profile_menu_selection = 0;
+                Storage* storage = furi_record_open(RECORD_STORAGE);
+                profile_load_list(storage, s);
+                furi_record_close(RECORD_STORAGE);
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestPickProfile) {
+            Storage* storage = furi_record_open(RECORD_STORAGE);
+            if(s->profile_menu_selection < MAX_PROFILES) {
+                profile_save_guest_to_slot(storage, s, s->profile_menu_selection);
+            } else {
+                uint8_t slot = 0;
+                for(; slot < MAX_PROFILES && s->profile_names[slot][0] != '\0'; slot++) { }
+                if(slot >= MAX_PROFILES) slot = 0;
+                s->current_profile_slot = slot;
+                snprintf(s->profile_names[slot], PROFILE_NAME_LEN, "Player %u", (unsigned)(slot + 1));
+                profile_save_current(storage, s);
+            }
+            furi_record_close(RECORD_STORAGE);
+            s->is_guest = false;
+            s->phase = PhaseSplash;
+            s->splash_selection = 0;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseProfileMenu) {
+            Storage* storage = furi_record_open(RECORD_STORAGE);
+            profile_ensure_dir(storage);
+            profile_load_list(storage, s);
+            if(s->profile_menu_selection < MAX_PROFILES) {
+                profile_load_slot(storage, s, s->profile_menu_selection);
+            } else {
+                profile_create_new(s);
+            }
+            furi_record_close(RECORD_STORAGE);
+            game_start_betting(s);
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseReshuffle) {
             /* Continue after reshuffle */
             s->reshuffle_announced = true;
@@ -943,6 +1367,22 @@ static bool input_callback(InputEvent* event, void* context) {
                     }
                     s->result_msg[sizeof(s->result_msg) - 1] = '\0';
                 } else {
+                    /* Dealer peek: 10 or Ace up -> check dealer blackjack */
+                    uint8_t dealer_up_rank = s->dealer_hand[1] % 13;
+                    bool dealer_has_10_or_ace = (dealer_up_rank >= 9);
+                    if(dealer_has_10_or_ace) {
+                        uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+                        if(dv == 21) {
+                            s->dealer_hole = false;
+                            s->games_played++;
+                            s->games_lost++;
+                            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer blackjack. -$%u", s->current_bet);
+                            s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+                            s->phase = PhaseResult;
+                            view_commit_model(app->view, true);
+                            return true;
+                        }
+                    }
                     bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
                     s->can_split = (is_pair && (s->balance >= s->current_bet));
                     if(s->can_split) {
@@ -1021,6 +1461,32 @@ static bool input_callback(InputEvent* event, void* context) {
         }
     }
     if(event->key == InputKeyUp) {
+        if(s->phase == PhaseSplash) {
+            if(s->splash_selection == 0) s->splash_selection = SPLASH_OPTIONS - 1;
+            else s->splash_selection--;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestSavePrompt) {
+            s->profile_menu_selection = 0;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestPickProfile) {
+            if(s->profile_menu_selection == 0) s->profile_menu_selection = MAX_PROFILES;
+            else s->profile_menu_selection--;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseProfileMenu) {
+            if(s->profile_menu_selection == 0) {
+                s->profile_menu_selection = MAX_PROFILES;
+            } else {
+                s->profile_menu_selection--;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseStatistics) {
             /* Scroll up - at top wrap to bottom */
             if(s->stat_scroll == 0) {
@@ -1038,6 +1504,32 @@ static bool input_callback(InputEvent* event, void* context) {
         }
     }
     if(event->key == InputKeyDown) {
+        if(s->phase == PhaseSplash) {
+            if(s->splash_selection >= SPLASH_OPTIONS - 1) s->splash_selection = 0;
+            else s->splash_selection++;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestSavePrompt) {
+            s->profile_menu_selection = 1;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseGuestPickProfile) {
+            if(s->profile_menu_selection >= MAX_PROFILES) s->profile_menu_selection = 0;
+            else s->profile_menu_selection++;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseProfileMenu) {
+            if(s->profile_menu_selection >= MAX_PROFILES) {
+                s->profile_menu_selection = 0;
+            } else {
+                s->profile_menu_selection++;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseStatistics) {
             /* Scroll down - at bottom wrap to top */
             if(s->stat_scroll >= STAT_MAX_SCROLL) {
@@ -1090,7 +1582,15 @@ int32_t blackjack_app(void* p) {
     state->games_lost = 0;
     state->games_pushed = 0;
     state->player_count2 = 0;
-    game_new_round(state);
+    state->phase = PhaseSplash;
+    state->splash_selection = 0;
+    state->profile_menu_selection = 0;
+    state->current_profile_slot = 0;
+    state->is_guest = false;
+    state->practice_mode = false;
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    profile_load_list(storage, state);
+    furi_record_close(RECORD_STORAGE);
     view_commit_model(app->view, true);
 
     view_dispatcher_add_view(app->view_dispatcher, 0, app->view);

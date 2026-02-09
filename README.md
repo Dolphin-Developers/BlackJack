@@ -4,7 +4,11 @@ Classic **Blackjack** (21) for Flipper Zero. Play against the dealer: get closer
 
 ## How to play
 
-- Start with **$3,125**. Place a bet before each round ($5 minimum, $500 maximum).
+- **Splash menu** (on start): Continue (last profile), New profile, Guest game, Practice mode, or Help. Up/Down to select, OK to choose, Back to exit.
+- **Profiles**: Up to 4 saved profiles (bank + game stats). Last-used profile is remembered for "Continue."
+- **Guest game**: Play without saving; from Bet or Result, Back asks "Save to profile?" (Yes = pick slot to save, No = return to splash).
+- **Practice mode**: Same as guest but shows **Wizard of Odds** basic strategy hints (Hit/Stand/Double/Split) during your turn.
+- Start with **$3,125** per profile (or guest). Place a bet before each round ($5 minimum, $500 maximum).
 - **Dealer (D)** and **Player (P)** each start with two cards. One dealer card is hidden until you stand.
 - **Hit** = take another card. **Stand** = keep your hand and let the dealer play.
 - Hand totals shown under "D:" and "P:" labels. Face cards = 10, Ace = 1 or 11 (best value).
@@ -17,13 +21,20 @@ Classic **Blackjack** (21) for Flipper Zero. Play against the dealer: get closer
 
 ## Controls
 
+### Splash Menu
+| Button | Action |
+|--------|--------|
+| **Up/Down** | Change selection |
+| **OK** | Select (Continue / New profile / Guest / Practice / Help) |
+| **Back** | Exit app |
+
 ### Betting Phase
 | Button | Action |
 |--------|--------|
 | **Left** | Decrease bet (by $5) |
 | **Right** | Increase bet (by $5) |
 | **OK** | Place bet and deal cards |
-| **Back** | Exit game |
+| **Back** | Save & return to profile menu (or, if guest, "Save to profile?" prompt) |
 
 ### During Play
 | Button | Action |
@@ -45,10 +56,15 @@ Classic **Blackjack** (21) for Flipper Zero. Play against the dealer: get closer
 | **Left** | Change bet (return to betting phase) |
 | **OK** | Bet again (deal new hand with same bet) |
 | **Right** | View statistics (wins, losses, win rate) |
-| **Back** | Exit game |
+| **Back** | Save & return to profile menu (or guest: "Save to profile?" prompt) |
 
 ## Features
 
+- **Splash menu**: Continue (last profile), New profile, Guest game, Practice mode, Help
+- **Player profiles**: Up to 4 saved profiles; bank and game stats stored on SD (`apps_data/blackjack/`)
+- **Last-used profile**: "Continue" loads the last profile you played
+- **Guest game**: Play without a profile; optionally save to a profile when leaving (Back from Bet/Result)
+- **Practice mode**: Wizard of Odds basic strategy hints (Hit/Stand/Double/Split) during your turn and on split prompt
 - **Betting system**: Start with $3,125, bet $5-$500 per hand
 - **Double down**: Double your bet on first 2 cards (if balance allows), draw one card, then automatically stand
 - **Split pairs**: Split pairs into two separate hands (if first 2 cards are same rank and balance allows), play each hand sequentially

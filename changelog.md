@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4
+
+- **Splash menu**: On start, choose Continue (last profile), New profile, Guest game, Practice mode, or Help (Up/Down, OK, Back=exit).
+- **Player profiles**: Up to 4 saved profiles; bank and game stats stored on SD under `apps_data/blackjack/`.
+- **Last-used profile**: "Continue" loads the profile you last played; saved automatically when leaving to menu.
+- **Guest game**: Play without saving; Back from Bet or Result shows "Save to profile?" (Yes = pick slot or New profile, No = return to splash).
+- **Practice mode**: Wizard of Odds basic strategy hints shown during player turn and split prompt (Hit/Stand/Double/Split).
+- **Dealer peek**: When dealer up card is 10 or Ace, dealer blackjack is checked immediately; hand ends with no hit/double/split.
+- **Double down**: Only allowed with exactly 2 cards (guard added).
+
 ## v0.3
 
 - Added statistics tracking: Win/loss/push counts and win rate percentage
