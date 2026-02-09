@@ -8,9 +8,85 @@
 #include <gui/view.h>
 #include <gui/view_dispatcher.h>
 #include <storage/storage.h>
+#include <notification/notification.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Notification sequences: vibration for blackjack only; sound for Hit/Stand only */
+static const NotificationMessage msg_vibro_on = {
+    .type = NotificationMessageTypeVibro,
+    .data.vibro = {.on = true},
+};
+static const NotificationMessage msg_vibro_off = {
+    .type = NotificationMessageTypeVibro,
+    .data.vibro = {.on = false},
+};
+static const NotificationMessage msg_delay_150 = {
+    .type = NotificationMessageTypeDelay,
+    .data.delay = {.length = 150},
+};
+static const NotificationSequence sequence_blackjack_vibro = {
+    &msg_vibro_on,
+    &msg_delay_150,
+    &msg_vibro_off,
+    NULL,
+};
+
+static const NotificationMessage msg_sound_hit_on = {
+    .type = NotificationMessageTypeSoundOn,
+    .data.sound = {.frequency = 400.f, .volume = 1.f},
+};
+static const NotificationMessage msg_sound_stand_on = {
+    .type = NotificationMessageTypeSoundOn,
+    .data.sound = {.frequency = 600.f, .volume = 1.f},
+};
+static const NotificationMessage msg_sound_off = {
+    .type = NotificationMessageTypeSoundOff,
+};
+static const NotificationMessage msg_delay_30 = {
+    .type = NotificationMessageTypeDelay,
+    .data.delay = {.length = 30},
+};
+static const NotificationSequence sequence_sound_hit = {
+    &msg_sound_hit_on,
+    &msg_delay_30,
+    &msg_sound_off,
+    NULL,
+};
+static const NotificationSequence sequence_sound_stand = {
+    &msg_sound_stand_on,
+    &msg_delay_30,
+    &msg_sound_off,
+    NULL,
+};
+
+static void blackjack_notify_vibro(bool vibro_on) {
+    if(!vibro_on) return;
+    NotificationApp* n = furi_record_open(RECORD_NOTIFICATION);
+    if(n) {
+        notification_message(n, &sequence_blackjack_vibro);
+        furi_record_close(RECORD_NOTIFICATION);
+    }
+}
+
+static void blackjack_notify_sound_hit(bool sound_on) {
+    if(!sound_on) return;
+    NotificationApp* n = furi_record_open(RECORD_NOTIFICATION);
+    if(n) {
+        notification_message(n, &sequence_sound_hit);
+        furi_record_close(RECORD_NOTIFICATION);
+    }
+}
+
+static void blackjack_notify_sound_stand(bool sound_on) {
+    if(!sound_on) return;
+    NotificationApp* n = furi_record_open(RECORD_NOTIFICATION);
+    if(n) {
+        notification_message(n, &sequence_sound_stand);
+        furi_record_close(RECORD_NOTIFICATION);
+    }
+}
 
 #define TAG "blackjack"
 #define MAX_HAND 6
@@ -30,6 +106,7 @@ typedef enum {
     PhaseDeal,
     PhasePlayerTurn,
     PhaseSplitPrompt,
+    PhaseInsurancePrompt,  /* Dealer Ace up: Insurance? Yes/No */
     PhaseDealerTurn,
     PhaseShowFinalCards,
     PhaseResult,
@@ -37,7 +114,9 @@ typedef enum {
     PhaseHelp,
     PhaseReshuffle,
     PhaseGuestSavePrompt,  /* Guest: Save to profile? Yes/No */
-    PhaseGuestPickProfile  /* Guest: pick slot to save to */
+    PhaseGuestPickProfile, /* Guest: pick slot to save to */
+    PhaseSettings,         /* Sound, Vibro, Dealer S17, Erase all */
+    PhaseConfirmErase     /* Confirm erase all profiles */
 } GamePhase;
 
 #define STARTING_BALANCE 3125
@@ -48,10 +127,13 @@ typedef enum {
 #define PROFILE_NAME_LEN 17
 #define BLACKJACK_PROFILES_PATH EXT_PATH("apps_data/blackjack/profiles.dat")
 #define BLACKJACK_LAST_USED_PATH EXT_PATH("apps_data/blackjack/last_used")
+#define BLACKJACK_SETTINGS_PATH EXT_PATH("apps_data/blackjack/settings.dat")
 #define PROFILES_FILE_MAGIC "BJ1"
-#define SPLASH_OPTIONS 5  /* Continue, New profile, Guest, Practice, Help */
+#define SPLASH_OPTIONS 6  /* Continue, New profile, Guest, Practice, Help, Settings */
 
-typedef struct {
+typedef struct BlackjackState BlackjackState;
+
+struct BlackjackState {
     uint8_t deck[DECK_SIZE];
     uint8_t deck_top;
     uint8_t deck_bottom; /* Track position for burning bottom cards */
@@ -68,7 +150,9 @@ typedef struct {
     uint16_t balance; /* player balance in dollars */
     uint16_t current_bet; /* current bet amount */
     uint16_t bet_hand2; /* bet for second hand after split */
-    bool is_blackjack; /* true if player got blackjack */
+    uint16_t base_bet;   /* original bet for session; reset to this before next hand */
+    uint16_t insurance_bet; /* 0 = none; half of base bet (rounded down) if taken */
+    bool is_blackjack; /* true if player got dealt blackjack (Ace + 10, two cards only) */
     bool can_double_down; /* true if player can double down (first 2 cards, enough balance) */
     bool can_split; /* true if player can split (first 2 cards are pair, enough balance) */
     bool is_split; /* true if hands are split */
@@ -80,17 +164,25 @@ typedef struct {
     uint16_t games_lost;
     uint16_t games_pushed;
     uint8_t stat_scroll; /* Scroll offset for stats menu (0 = top, loops) */
+    uint8_t help_scroll; /* Scroll offset for help (0 = top) */
     uint8_t profile_menu_selection;
     uint8_t current_profile_slot;
     char profile_names[MAX_PROFILES][PROFILE_NAME_LEN];
-    uint8_t splash_selection;   /* 0=Continue, 1=New, 2=Guest, 3=Practice, 4=Help */
+    uint8_t splash_selection;   /* 0=Continue, 1=New, 2=Guest, 3=Practice, 4=Help, 5=Settings */
     bool is_guest;
     bool practice_mode;
-} BlackjackState;
+    /* Settings (persisted) */
+    bool sound_on;
+    bool vibro_on;
+    bool dealer_hits_soft17;
+};
 
 #define STAT_LINES 5   /* Games, Wins, Losses, Pushes, Win Rate */
 #define STAT_VISIBLE 3 /* Lines visible at once */
 #define STAT_MAX_SCROLL (STAT_LINES > STAT_VISIBLE ? STAT_LINES - STAT_VISIBLE : 0)
+#define HELP_LINES 10
+#define HELP_VISIBLE 6
+#define HELP_MAX_SCROLL (HELP_LINES > HELP_VISIBLE ? HELP_LINES - HELP_VISIBLE : 0)
 
 /* Best hand value (Ace 1 or 11). Returns 0-31; >21 is bust. */
 static uint8_t hand_value(const uint8_t* hand, uint8_t count) {
@@ -129,6 +221,13 @@ static void hand_values_soft_hard(const uint8_t* hand, uint8_t count, uint8_t* s
         *soft -= 10;
         aces--;
     }
+}
+
+/* True if hand value is 17 and it's a soft 17 (Ace counted as 11) */
+static bool hand_is_soft_17(const uint8_t* hand, uint8_t count) {
+    uint8_t soft = 0, hard = 0;
+    hand_values_soft_hard(hand, count, &soft, &hard);
+    return (soft == 17 && soft != hard);
 }
 
 /* Wizard of Odds basic strategy hint (simplified). Returns recommended action. */
@@ -395,6 +494,76 @@ static void profile_save_guest_to_slot(Storage* storage, BlackjackState* s, uint
     profile_save_current(storage, s);
 }
 
+#define SETTINGS_MAGIC_LEN 4
+static const char SETTINGS_MAGIC[SETTINGS_MAGIC_LEN] = "BJS\0";
+
+static void settings_load(Storage* storage, BlackjackState* s) {
+    s->sound_on = true;
+    s->vibro_on = true;
+    s->dealer_hits_soft17 = false;
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_SETTINGS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(file);
+        return;
+    }
+    char magic[SETTINGS_MAGIC_LEN];
+    if(storage_file_read(file, magic, SETTINGS_MAGIC_LEN) != SETTINGS_MAGIC_LEN ||
+       memcmp(magic, SETTINGS_MAGIC, SETTINGS_MAGIC_LEN) != 0) {
+        storage_file_close(file);
+        storage_file_free(file);
+        return;
+    }
+    uint8_t flags;
+    if(storage_file_read(file, &flags, 1) == 1) {
+        s->sound_on = (flags & 1) != 0;
+        s->vibro_on = (flags & 2) != 0;
+        s->dealer_hits_soft17 = (flags & 4) != 0;
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+}
+
+static void settings_save(Storage* storage, BlackjackState* s) {
+    profile_ensure_dir(storage);
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_SETTINGS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_free(file);
+        return;
+    }
+    storage_file_write(file, SETTINGS_MAGIC, SETTINGS_MAGIC_LEN);
+    uint8_t flags = (s->sound_on ? 1 : 0) | (s->vibro_on ? 2 : 0) | (s->dealer_hits_soft17 ? 4 : 0);
+    storage_file_write(file, &flags, 1);
+    storage_file_sync(file);
+    storage_file_close(file);
+    storage_file_free(file);
+}
+
+static void profile_erase_all(Storage* storage, BlackjackState* s) {
+    profile_ensure_dir(storage);
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, BLACKJACK_PROFILES_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_free(file);
+        return;
+    }
+    storage_file_write(file, PROFILES_FILE_MAGIC, 4);
+    ProfileRecord rec;
+    memset(rec.name, 0, sizeof(rec.name));
+    rec.balance = STARTING_BALANCE;
+    rec.games_played = rec.games_won = rec.games_lost = rec.games_pushed = 0;
+    for(uint8_t i = 0; i < MAX_PROFILES; i++) {
+        storage_file_write(file, &rec, sizeof(rec));
+    }
+    storage_file_sync(file);
+    storage_file_close(file);
+    storage_file_free(file);
+    profile_save_last_used(storage, 0);
+    profile_load_list(storage, s);
+    s->current_profile_slot = 0;
+    s->balance = STARTING_BALANCE;
+    s->games_played = s->games_won = s->games_lost = s->games_pushed = 0;
+    snprintf(s->profile_names[0], PROFILE_NAME_LEN, "Player 1");
+}
+
 static void profile_create_new(BlackjackState* s) {
     uint8_t slot = 0;
     if(s->profile_names[0][0] != '\0') {
@@ -415,6 +584,7 @@ static void game_start_betting(BlackjackState* s) {
     if(s->current_bet > s->balance) {
         s->current_bet = (s->balance < MIN_BET) ? 0 : s->balance;
     }
+    s->base_bet = s->current_bet;  /* default; overwritten when they place bet */
     s->result_msg[0] = '\0';
     s->is_blackjack = false;
     s->can_double_down = false;
@@ -433,11 +603,48 @@ static void game_show_statistics(BlackjackState* s) {
 static void game_show_help(BlackjackState* s) {
     s->prev_phase = s->phase;
     s->phase = PhaseHelp;
+    s->help_scroll = 0;
+}
+
+/* Resolve insurance choice: peek dealer; if dealer blackjack settle (main + insurance), else continue to player turn/split */
+static void resolve_insurance(BlackjackState* s, bool took_insurance) {
+    if(took_insurance) {
+        s->insurance_bet = s->current_bet / 2;  /* half, rounded down */
+        s->balance -= s->insurance_bet;
+    }
+    s->dealer_hole = false;
+    uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+    if(dv == 21) {
+        s->games_played++;
+        if(took_insurance) {
+            s->balance += s->current_bet;  /* main bet back (push) */
+            s->balance += s->insurance_bet * 2;  /* insurance pays 2:1 */
+            s->games_pushed++;
+            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer BJ. Ins +$%u", s->insurance_bet);
+        } else {
+            s->games_lost++;
+            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer blackjack. -$%u", s->current_bet);
+        }
+        s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+        s->phase = PhaseResult;
+        blackjack_notify_vibro(s->vibro_on); /* vibration: dealer blackjack */
+        return;
+    }
+    bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
+    s->can_split = (is_pair && (s->balance >= s->current_bet));
+    if(s->can_split) {
+        s->phase = PhaseSplitPrompt;
+    } else {
+        s->phase = PhasePlayerTurn;
+        s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
+    }
 }
 
 static void game_place_bet(BlackjackState* s) {
     if(s->current_bet == 0 || s->current_bet > s->balance) return;
+    s->base_bet = s->current_bet;  /* remember for reset after double/split/insurance */
     s->balance -= s->current_bet;
+    s->insurance_bet = 0;
     game_deal_cards(s);
 }
 
@@ -462,55 +669,64 @@ static void game_deal_cards(BlackjackState* s) {
         return;
     }
 
+    /* Player blackjack only on initial two-card 21 (Ace + 10-value) */
     uint8_t pv = hand_value(s->player_hand, s->player_count);
-    if(pv == 21) {
-        /* Player blackjack - reveal dealer and resolve */
+    bool player_has_blackjack = (s->player_count == 2 && pv == 21);
+    if(player_has_blackjack) {
         s->is_blackjack = true;
         s->dealer_hole = false;
         s->phase = PhaseShowFinalCards;
         uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
         if(dv == 21) {
-            s->balance += s->current_bet; /* return bet on push */
+            s->balance += s->current_bet; /* push */
             snprintf(s->result_msg, sizeof(s->result_msg), "Push. +$%u", s->current_bet);
         } else {
-            /* Blackjack pays 3:2 */
             uint16_t payout = s->current_bet + (s->current_bet * 3 / 2);
             s->balance += payout;
             snprintf(s->result_msg, sizeof(s->result_msg), "Blackjack! +$%u", payout);
         }
         s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+        blackjack_notify_vibro(s->vibro_on); /* vibration: blackjack (player or push) */
+        return;
+    }
+    /* Dealer up card: second card (index 1) */
+    uint8_t dealer_up_rank = s->dealer_hand[1] % 13; /* 0-12: 2..9, 8-11=10/J/Q/K, 12=Ace */
+    bool dealer_up_is_ace = (dealer_up_rank == 12);
+    bool dealer_up_is_10 = (dealer_up_rank >= 8 && dealer_up_rank <= 11);
+    if(dealer_up_is_ace) {
+        /* Offer insurance before peeking (pop-up like result screen) */
+        s->phase = PhaseInsurancePrompt;
+        s->profile_menu_selection = 0; /* 0=No, 1=Yes */
+        return;
+    }
+    if(dealer_up_is_10) {
+        /* Peek: if dealer has blackjack, hand ends immediately */
+        uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
+        if(dv == 21) {
+            s->dealer_hole = false;
+            s->games_played++;
+            s->games_lost++;
+            snprintf(s->result_msg, sizeof(s->result_msg), "Dealer blackjack. -$%u", s->current_bet);
+            s->result_msg[sizeof(s->result_msg) - 1] = '\0';
+            s->phase = PhaseResult;
+            blackjack_notify_vibro(s->vibro_on); /* vibration: dealer blackjack */
+            return;
+        }
+    }
+    /* No dealer blackjack - player turn or split prompt */
+    bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
+    s->can_split = (is_pair && (s->balance >= s->current_bet));
+    if(s->can_split) {
+        s->phase = PhaseSplitPrompt;
     } else {
-        /* Dealer peek: when up card is 10 or Ace, check for dealer blackjack (Wizard of Odds standard) */
-        uint8_t dealer_up_rank = s->dealer_hand[1] % 13; /* Up card is second card: 9=10, 10=J, 11=Q, 12=K/A */
-        bool dealer_has_10_or_ace = (dealer_up_rank >= 9);
-        if(dealer_has_10_or_ace) {
-            uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
-            if(dv == 21) {
-                /* Dealer blackjack - end hand immediately; player loses (no hit/double/split) */
-                s->dealer_hole = false;
-                s->games_played++;
-                s->games_lost++;
-                snprintf(s->result_msg, sizeof(s->result_msg), "Dealer blackjack. -$%u", s->current_bet);
-                s->result_msg[sizeof(s->result_msg) - 1] = '\0';
-                s->phase = PhaseResult;
-                return;
-            }
-        }
-        /* No dealer blackjack - check if player can split */
-        bool is_pair = (s->player_count == 2 && CARD_RANK(s->player_hand[0]) == CARD_RANK(s->player_hand[1]));
-        s->can_split = (is_pair && (s->balance >= s->current_bet));
-        if(s->can_split) {
-            s->phase = PhaseSplitPrompt;
-        } else {
-            s->phase = PhasePlayerTurn;
-            s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
-        }
+        s->phase = PhasePlayerTurn;
+        s->can_double_down = (s->player_count == 2 && (s->balance >= s->current_bet));
     }
 }
 
 static void game_player_hit(BlackjackState* s) {
     if(s->phase != PhasePlayerTurn) return;
-    
+    blackjack_notify_sound_hit(s->sound_on); /* audio: hit */
     uint8_t* hand = (s->is_split && s->active_hand == 1) ? s->player_hand2 : s->player_hand;
     uint8_t* count = (s->is_split && s->active_hand == 1) ? &s->player_count2 : &s->player_count;
     
@@ -597,23 +813,24 @@ static void game_player_split(BlackjackState* s) {
 
 static void game_player_stand(BlackjackState* s) {
     if(s->phase != PhasePlayerTurn) return;
-    
-    /* If split and on first hand, move to second hand */
+    /* If split and on first hand, move to second hand (no stand sound) */
     if(s->is_split && s->active_hand == 0) {
         s->active_hand = 1;
         s->can_double_down = (s->player_count2 == 2 && (s->balance >= s->bet_hand2));
         s->can_split = false;
         return;
     }
-    
+    blackjack_notify_sound_stand(s->sound_on); /* audio: stand (both hands done) */
     /* Both hands done, dealer's turn */
     s->phase = PhaseDealerTurn;
     s->dealer_hole = false;
 
     uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
-    while(dv < 17 && s->dealer_count < MAX_HAND) {
+    bool hit_soft17 = s->dealer_hits_soft17 && hand_is_soft_17(s->dealer_hand, s->dealer_count);
+    while((dv < 17 || (dv == 17 && hit_soft17)) && s->dealer_count < MAX_HAND) {
         s->dealer_hand[s->dealer_count++] = draw_card(s);
         dv = hand_value(s->dealer_hand, s->dealer_count);
+        hit_soft17 = s->dealer_hits_soft17 && hand_is_soft_17(s->dealer_hand, s->dealer_count);
         /* Dealer busts if they draw 6 cards without winning */
         if(s->dealer_count == MAX_HAND && dv <= 21) {
             /* Dealer has 6 cards but didn't win - they bust */
@@ -789,7 +1006,8 @@ static void draw_callback(Canvas* canvas, void* model) {
             "New profile",
             "Guest game",
             "Practice mode",
-            "Help"
+            "Help",
+            "Settings"
         };
         const int line_h = 9;
         for(uint8_t i = 0; i < SPLASH_OPTIONS; i++) {
@@ -797,7 +1015,6 @@ static void draw_callback(Canvas* canvas, void* model) {
             if(i == s->splash_selection) canvas_draw_str(canvas, box_x + 2, y, ">");
             canvas_draw_str(canvas, box_x + 10, y, splash_opts[i]);
         }
-        canvas_draw_str(canvas, 0, 62, "Up/Down OK=Select Back=Exit");
         return;
     }
     if(s->phase == PhaseGuestSavePrompt) {
@@ -810,7 +1027,6 @@ static void draw_callback(Canvas* canvas, void* model) {
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_str(canvas, 22, 38, s->profile_menu_selection == 0 ? "> No" : "  No");
         canvas_draw_str(canvas, 70, 38, s->profile_menu_selection == 1 ? "> Yes" : "  Yes");
-        canvas_draw_str(canvas, 0, 62, "Up/Down OK Back=Cancel");
         return;
     }
     if(s->phase == PhaseGuestPickProfile) {
@@ -824,7 +1040,6 @@ static void draw_callback(Canvas* canvas, void* model) {
             if(i < MAX_PROFILES) canvas_draw_str(canvas, 8, y, s->profile_names[i]);
             else canvas_draw_str(canvas, 8, y, "New profile");
         }
-        canvas_draw_str(canvas, 0, 62, "Up/Down OK=Save Back=Cancel");
         return;
     }
 
@@ -843,7 +1058,35 @@ static void draw_callback(Canvas* canvas, void* model) {
                 canvas_draw_str(canvas, 8, y, "New profile");
             }
         }
-        canvas_draw_str(canvas, 0, 62, "Up/Down=Select OK=Play Back=Exit");
+        return;
+    }
+
+    if(s->phase == PhaseSettings) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 0, 10, "Settings");
+        canvas_set_font(canvas, FontSecondary);
+        const int line_h = 10;
+        int y = 20;
+        canvas_draw_str(canvas, 0, y, s->profile_menu_selection == 0 ? ">" : " ");
+        canvas_draw_str(canvas, 8, y, s->sound_on ? "Sound: On " : "Sound: Off");
+        y += line_h;
+        canvas_draw_str(canvas, 0, y, s->profile_menu_selection == 1 ? ">" : " ");
+        canvas_draw_str(canvas, 8, y, s->vibro_on ? "Vibro: On " : "Vibro: Off");
+        y += line_h;
+        canvas_draw_str(canvas, 0, y, s->profile_menu_selection == 2 ? ">" : " ");
+        canvas_draw_str(canvas, 8, y, s->dealer_hits_soft17 ? "Dealer S17: Hit" : "Dealer S17: Stand");
+        y += line_h;
+        canvas_draw_str(canvas, 0, y, s->profile_menu_selection == 3 ? ">" : " ");
+        canvas_draw_str(canvas, 8, y, "Erase all profiles");
+        return;
+    }
+
+    if(s->phase == PhaseConfirmErase) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "Erase all profiles?");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 2, 26, "Banks reset to $3125.");
+        canvas_draw_str(canvas, 2, 38, "Back=Cancel OK=Yes");
         return;
     }
 
@@ -860,10 +1103,7 @@ static void draw_callback(Canvas* canvas, void* model) {
         /* Draw chip stack that grows with bet amount - positioned after bet text */
         int chip_x = canvas_string_width(canvas, bet_buf) + 8;
         draw_chip_stack(canvas, chip_x, 24, s->current_bet);
-        /* Help text in footer - double stacked with more spacing */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 54, "Left/Right=Adjust");
-        canvas_draw_str(canvas, 0, 62, "OK=Deal  Back=Exit");
     } else if(s->phase == PhaseStatistics) {
         /* Statistics display - scrollable, loops top-bottom bottom-top */
         canvas_set_font(canvas, FontPrimary);
@@ -905,38 +1145,35 @@ static void draw_callback(Canvas* canvas, void* model) {
             }
             canvas_draw_str(canvas, 0, y + (i * line_h), stat_buf);
         }
-        
-        /* Footer instructions */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 62, "Up/Down=Scroll Back=Return");
     } else if(s->phase == PhaseHelp) {
-        /* Help screen - enlarged box, no footer */
-        int box_x = 5;
-        int box_y = 5;
-        int box_w = 118;
-        int box_h = 57;
-        /* White box */
+        int box_x = 2;
+        int box_y = 0;
+        int box_w = 124;
+        int box_h = 58;
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
-        /* Black outline */
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
-        /* Help text inside box */
         canvas_set_font(canvas, FontSecondary);
-        int y_pos = box_y + 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "OK=Hit  Back=Stand");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Up=Double Down=Split");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Right=Help");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Result Screen:");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Left=Bet OK=Again");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Right=Stats");
-        y_pos += 8;
-        canvas_draw_str(canvas, box_x + 4, y_pos, "Back=Return");
+        static const char* const help_text[HELP_LINES] = {
+            "Splash: Up/Down=Select OK Back=Exit",
+            "Bet: Left/Right=Bet OK=Deal Back=Menu",
+            "Play: OK=Hit Back=Stand",
+            "Up=Double Down=Split Right=Help",
+            "Split: Down=Yes Back=No",
+            "Insurance: Down=Yes Back=No",
+            "Reshuffle: OK=Continue",
+            "Result: Left=Bet OK=Again Right=Stats",
+            "Back=Menu (or Save? if guest)",
+            "Stats: Up/Down=Scroll Back=Return"
+        };
+        const int line_h = 9;
+        for(uint8_t i = 0; i < HELP_VISIBLE; i++) {
+            uint8_t idx = s->help_scroll + i;
+            if(idx >= HELP_LINES) break;
+            canvas_draw_str(canvas, box_x + 4, box_y + 10 + (int)i * line_h, help_text[idx]);
+        }
     } else if(s->phase == PhaseReshuffle) {
         /* Reshuffle announcement - result box style */
         int box_x = 10;
@@ -954,9 +1191,7 @@ static void draw_callback(Canvas* canvas, void* model) {
         const char* reshuffle_text = "Reshuffling...";
         int text_x = box_x + (box_w - canvas_string_width(canvas, reshuffle_text)) / 2;
         canvas_draw_str(canvas, text_x, box_y + 18, reshuffle_text);
-        /* Footer */
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 62, "OK=Continue");
     } else if(s->phase == PhaseSplitPrompt) {
         /* Split prompt - result box style */
         int box_x = 10;
@@ -985,7 +1220,20 @@ static void draw_callback(Canvas* canvas, void* model) {
             canvas_draw_str(canvas, 0, 52, buf);
         }
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 0, 62, "Down=Split Back=No");
+    } else if(s->phase == PhaseInsurancePrompt) {
+        int box_x = 10;
+        int box_y = 18;
+        int box_w = 108;
+        int box_h = 28;
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, box_x, box_y, box_w, box_h);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, box_x, box_y, box_w, box_h);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, box_x + 8, box_y + 10, "Insurance? Half bet");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, box_x + 22, box_y + 22, s->profile_menu_selection == 0 ? "> No" : "  No");
+        canvas_draw_str(canvas, box_x + 70, box_y + 22, s->profile_menu_selection == 1 ? "> Yes" : "  Yes");
     } else if(s->phase == PhaseDeal || s->phase == PhasePlayerTurn || s->phase == PhaseDealerTurn || s->phase == PhaseShowFinalCards || s->phase == PhaseResult) {
         /* Show bet amount on right side */
         canvas_set_font(canvas, FontSecondary);
@@ -1114,21 +1362,16 @@ static void draw_callback(Canvas* canvas, void* model) {
             canvas_draw_str(canvas, 0, 32, dvbuf);
         }
 
-        /* Help text in footer - one line */
         canvas_set_font(canvas, FontSecondary);
-        if(s->phase == PhasePlayerTurn) {
-            if(s->practice_mode) {
-                const uint8_t* ph = (s->is_split && s->active_hand == 1) ? s->player_hand2 : s->player_hand;
-                uint8_t pc = (s->is_split && s->active_hand == 1) ? s->player_count2 : s->player_count;
-                const char* hint = wizard_strategy_hint(ph, pc, s->dealer_hand[1], s->can_double_down, s->can_split);
-                char buf[24];
-                snprintf(buf, sizeof(buf), "Strategy: %s", hint);
-                canvas_draw_str(canvas, 0, 52, buf);
-            }
-            canvas_draw_str(canvas, 0, 62, "K=Hit BK=Stand R=Help");
-        } else if(s->phase == PhaseShowFinalCards) {
-            canvas_draw_str(canvas, 0, 62, "K=Result R=Help");
-        } else if(s->phase == PhaseResult) {
+        if(s->phase == PhasePlayerTurn && s->practice_mode) {
+            const uint8_t* ph = (s->is_split && s->active_hand == 1) ? s->player_hand2 : s->player_hand;
+            uint8_t pc = (s->is_split && s->active_hand == 1) ? s->player_count2 : s->player_count;
+            const char* hint = wizard_strategy_hint(ph, pc, s->dealer_hand[1], s->can_double_down, s->can_split);
+            char buf[24];
+            snprintf(buf, sizeof(buf), "Strategy: %s", hint);
+            canvas_draw_str(canvas, 0, 52, buf);
+        }
+        if(s->phase == PhaseResult) {
             /* Draw result box overlay - white box with black outline (larger) */
             int box_x = 10;
             int box_y = 10;
@@ -1156,9 +1399,6 @@ static void draw_callback(Canvas* canvas, void* model) {
             /* Result message centered */
             int msg_x = box_x + (box_w - canvas_string_width(canvas, s->result_msg)) / 2;
             canvas_draw_str(canvas, msg_x, box_y + 28, s->result_msg);
-            /* Footer instructions - one line */
-            canvas_set_font(canvas, FontSecondary);
-            canvas_draw_str(canvas, 0, 62, "Left=Bet OK=Again Right=Stats");
         }
     }
 }
@@ -1182,6 +1422,11 @@ static bool input_callback(InputEvent* event, void* context) {
             view_commit_model(app->view, true);
             return true;
         }
+        if(s->phase == PhaseInsurancePrompt) {
+            resolve_insurance(s, false);  /* No insurance */
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseSplitPrompt) {
             /* Decline split - continue with normal play */
             s->phase = PhasePlayerTurn;
@@ -1199,6 +1444,16 @@ static bool input_callback(InputEvent* event, void* context) {
         if(s->phase == PhaseSplash) {
             view_commit_model(app->view, false);
             view_dispatcher_stop(app->view_dispatcher);
+            return true;
+        }
+        if(s->phase == PhaseSettings) {
+            s->phase = PhaseSplash;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseConfirmErase) {
+            s->phase = PhaseSettings;
+            view_commit_model(app->view, true);
             return true;
         }
         if(s->phase == PhaseProfileMenu) {
@@ -1273,10 +1528,45 @@ static bool input_callback(InputEvent* event, void* context) {
                 s->phase = PhaseHelp;
                 furi_record_close(RECORD_STORAGE);
                 break;
+            case 5: /* Settings */
+                s->phase = PhaseSettings;
+                s->profile_menu_selection = 0;
+                furi_record_close(RECORD_STORAGE);
+                break;
             default:
                 furi_record_close(RECORD_STORAGE);
                 break;
             }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseSettings) {
+            /* 0=Sound, 1=Vibro, 2=Dealer S17, 3=Erase all */
+            if(s->profile_menu_selection < 3) {
+                if(s->profile_menu_selection == 0) s->sound_on = !s->sound_on;
+                else if(s->profile_menu_selection == 1) s->vibro_on = !s->vibro_on;
+                else s->dealer_hits_soft17 = !s->dealer_hits_soft17;
+                Storage* storage = furi_record_open(RECORD_STORAGE);
+                settings_save(storage, s);
+                furi_record_close(RECORD_STORAGE);
+            } else {
+                s->phase = PhaseConfirmErase;
+            }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseConfirmErase) {
+            Storage* storage = furi_record_open(RECORD_STORAGE);
+            profile_erase_all(storage, s);
+            furi_record_close(RECORD_STORAGE);
+            s->phase = PhaseSplash;
+            s->splash_selection = 0;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseInsurancePrompt) {
+            bool took = (s->profile_menu_selection == 1);
+            resolve_insurance(s, took);
             view_commit_model(app->view, true);
             return true;
         }
@@ -1350,9 +1640,10 @@ static bool input_callback(InputEvent* event, void* context) {
                         return true;
                     }
                 }
-                /* Finish dealing */
+                /* Finish dealing - same rules as game_deal_cards */
                 uint8_t pv = hand_value(s->player_hand, s->player_count);
-                if(pv == 21) {
+                bool player_bj = (s->player_count == 2 && pv == 21);
+                if(player_bj) {
                     s->is_blackjack = true;
                     s->dealer_hole = false;
                     s->phase = PhaseShowFinalCards;
@@ -1367,10 +1658,16 @@ static bool input_callback(InputEvent* event, void* context) {
                     }
                     s->result_msg[sizeof(s->result_msg) - 1] = '\0';
                 } else {
-                    /* Dealer peek: 10 or Ace up -> check dealer blackjack */
                     uint8_t dealer_up_rank = s->dealer_hand[1] % 13;
-                    bool dealer_has_10_or_ace = (dealer_up_rank >= 9);
-                    if(dealer_has_10_or_ace) {
+                    bool dealer_up_is_ace = (dealer_up_rank == 12);
+                    bool dealer_up_is_10 = (dealer_up_rank >= 8 && dealer_up_rank <= 11);
+                    if(dealer_up_is_ace) {
+                        s->phase = PhaseInsurancePrompt;
+                        s->profile_menu_selection = 0;
+                        view_commit_model(app->view, true);
+                        return true;
+                    }
+                    if(dealer_up_is_10) {
                         uint8_t dv = hand_value(s->dealer_hand, s->dealer_count);
                         if(dv == 21) {
                             s->dealer_hole = false;
@@ -1410,8 +1707,14 @@ static bool input_callback(InputEvent* event, void* context) {
             return true;
         }
         if(s->phase == PhaseResult) {
-            /* Bet Again - deal new hand with same bet */
-            game_deal_cards(s);
+            /* Bet Again - restore original bet, deduct, and deal */
+            s->current_bet = s->base_bet;
+            if(s->current_bet > s->balance) s->current_bet = (s->balance < MIN_BET) ? 0 : s->balance;
+            if(s->current_bet > 0 && s->current_bet <= s->balance) {
+                s->balance -= s->current_bet;
+                s->insurance_bet = 0;
+                game_deal_cards(s);
+            }
             view_commit_model(app->view, true);
             return true;
         }
@@ -1467,6 +1770,16 @@ static bool input_callback(InputEvent* event, void* context) {
             view_commit_model(app->view, true);
             return true;
         }
+        if(s->phase == PhaseHelp) {
+            if(s->help_scroll > 0) s->help_scroll--;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseInsurancePrompt) {
+            s->profile_menu_selection = 0;
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseGuestSavePrompt) {
             s->profile_menu_selection = 0;
             view_commit_model(app->view, true);
@@ -1484,6 +1797,12 @@ static bool input_callback(InputEvent* event, void* context) {
             } else {
                 s->profile_menu_selection--;
             }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseSettings) {
+            if(s->profile_menu_selection == 0) s->profile_menu_selection = 3;
+            else s->profile_menu_selection--;
             view_commit_model(app->view, true);
             return true;
         }
@@ -1510,6 +1829,16 @@ static bool input_callback(InputEvent* event, void* context) {
             view_commit_model(app->view, true);
             return true;
         }
+        if(s->phase == PhaseHelp) {
+            if(s->help_scroll < HELP_MAX_SCROLL) s->help_scroll++;
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseInsurancePrompt) {
+            s->profile_menu_selection = 1;
+            view_commit_model(app->view, true);
+            return true;
+        }
         if(s->phase == PhaseGuestSavePrompt) {
             s->profile_menu_selection = 1;
             view_commit_model(app->view, true);
@@ -1527,6 +1856,12 @@ static bool input_callback(InputEvent* event, void* context) {
             } else {
                 s->profile_menu_selection++;
             }
+            view_commit_model(app->view, true);
+            return true;
+        }
+        if(s->phase == PhaseSettings) {
+            if(s->profile_menu_selection >= 3) s->profile_menu_selection = 0;
+            else s->profile_menu_selection++;
             view_commit_model(app->view, true);
             return true;
         }
@@ -1577,6 +1912,8 @@ int32_t blackjack_app(void* p) {
     state->balance = STARTING_BALANCE;
     state->current_bet = 0;
     state->bet_hand2 = 0;
+    state->base_bet = MIN_BET;
+    state->insurance_bet = 0;
     state->games_played = 0;
     state->games_won = 0;
     state->games_lost = 0;
@@ -1590,6 +1927,7 @@ int32_t blackjack_app(void* p) {
     state->practice_mode = false;
     Storage* storage = furi_record_open(RECORD_STORAGE);
     profile_load_list(storage, state);
+    settings_load(storage, state);
     furi_record_close(RECORD_STORAGE);
     view_commit_model(app->view, true);
 

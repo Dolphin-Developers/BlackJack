@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5
+
+- **Settings menu**: From splash, choose Settings (6th option). Sound on/off, Vibration on/off, Dealer hits soft 17 on/off; persisted to SD (`apps_data/blackjack/settings.dat`).
+- **Erase all profiles**: In Settings, option to reset all 4 profiles (banks to $3,125, stats cleared); confirmation screen (Back=cancel, OK=confirm).
+- **Dealer rule**: Optional “Dealer hits soft 17” (Settings). When on, dealer draws again on soft 17 (Ace+6); default off.
+- **Audio**: Short tone on Hit (~400 Hz) and on Stand (~600 Hz); respects Settings → Sound.
+- **Vibration**: Short burst on blackjack only (player or dealer); respects Settings → Vibro.
+- **App icon**: Updated 10×10 icon (Ace of Spades + Queen of Hearts, Queen on top).
+- **Docs**: README updated with Settings and feedback; ROADMAP Phase 3 Settings marked done.
+
 ## v0.4
 
 - **Splash menu**: On start, choose Continue (last profile), New profile, Guest game, Practice mode, or Help (Up/Down, OK, Back=exit).
@@ -9,6 +19,7 @@
 - **Practice mode**: Wizard of Odds basic strategy hints shown during player turn and split prompt (Hit/Stand/Double/Split).
 - **Dealer peek**: When dealer up card is 10 or Ace, dealer blackjack is checked immediately; hand ends with no hit/double/split.
 - **Double down**: Only allowed with exactly 2 cards (guard added).
+- **Catalog submission**: Added `manifest.yml` template and README "Catalog submission" steps; ROADMAP Phase 1–2 and Phase 4 updated for app store readiness.
 
 ## v0.3
 

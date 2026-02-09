@@ -127,22 +127,39 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 
 ### Phase 1 — Core game (MVP)
 
-- [ ] **Deck**: Standard 52 cards; shuffle (e.g. Fisher–Yates).
-- [ ] **Dealer vs player**: One human player, one dealer (house).
-- [ ] **Basic flow**: Deal 2 cards each; player hand visible, one dealer card hidden.
-- [ ] **Player actions**: Hit (one card), Stand (end turn).
-- [ ] **Dealer logic**: Dealer draws to 16, stands on 17+ (standard house rules).
-- [ ] **Hand value**: Aces 1 or 11; face cards 10; no splitting/doubling in MVP.
-- [ ] **Win/loss**: Compare totals; bust (over 21) loses; blackjack (21 in two cards) wins (optional: 3:2 payout in later phase).
-- [ ] **UI**: Simple text/graphics on Flipper (canvas + fonts): cards, totals, “Hit” / “Stand”, result message.
-- [ ] **Controls**: Map Flipper buttons (e.g. OK = Hit, Back = Stand; or Left/Right + OK) and document in README.
+- [x] **Deck**: 3-deck shoe (156 cards); Fisher–Yates shuffle; burn top + bottom 20.
+- [x] **Dealer vs player**: One human player, one dealer (house).
+- [x] **Basic flow**: Deal 2 cards each; player hand visible, one dealer card hidden.
+- [x] **Player actions**: Hit (one card), Stand (end turn).
+- [x] **Dealer logic**: Dealer draws to 16, stands on 17+ (standard house rules).
+- [x] **Hand value**: Aces 1 or 11; face cards 10; soft/hard totals shown.
+- [x] **Win/loss**: Compare totals; bust loses; blackjack (21 in two cards) wins 3:2; push returns bet.
+- [x] **UI**: Simple text/graphics on Flipper (canvas + fonts): cards, totals, “Hit” / “Stand”, result message.
+- [x] **Controls**: OK = Hit, Back = Stand; documented in README and in-app Help.
 
 ### Phase 2 — Polish and game feel
 
-- [ ] **New round**: After win/loss, “Play again?” (e.g. OK = yes, Back = exit to menu).
-- [ ] **Score or stats**: Optional on-screen win/loss count (or sessions played) for the session.
-- [ ] **Visual/audio**: Card reveal animation or beep on deal/hit; optional short “win/lose” feedback (vibration/sound if API available).
-- [ ] **Edge cases**: Double aces (soft 22) treated as 12; clear bust/blackjack messaging.
+- [x] **New round**: After win/loss, “Play again?” (e.g. OK = yes, Back = exit to menu).
+- [x] **Score or stats**: Win/loss/push count, win rate; scrollable stats (Right on result).
+- [x] **Vibration**: On blackjack only (player or dealer); short burst via notification API.
+- [x] **Audio**: Hit and Stand only; short tones (Hit ≈400 Hz, Stand ≈600 Hz).
+- [ ] **Visual/audio** (optional, future): Card reveal animation or beep on deal; optional short “win/lose” feedback (vibration/sound if API available).
+- [x] **Edge cases**: Soft/hard aces; dealer peek; insurance on Ace; clear bust/blackjack messaging.
+
+### Best places for better images (visual assets)
+
+Screen: **128×64 px**, monochrome (1-bit or limited grayscale). Layout is canvas + fonts; images can replace or augment text.
+
+| Place | Phase / screen | Notes |
+|-------|----------------|--------|
+| **Splash** | PhaseSplash | Full-screen or centered logo; "Blackjack" title + optional card motif. High impact for first impression. |
+| **Betting** | PhaseBetting | Chips stack or bet cursor; could show chip denominations ($5–$500) as small sprites. |
+| **Card graphics** | PhaseDeal, PlayerTurn, DealerTurn, ShowFinalCards | Replace or augment text cards (e.g. "AS", "QH") with tiny card faces or backs; ~small rect per card, multiple cards in a row—size constraint makes full card art hard; consider minimal suit/rank symbols. |
+| **Result overlay** | PhaseResult | Win/lose/push badge or short message graphic; optional confetti or simple border. |
+| **Profile menu** | PhaseProfileMenu | Icon per menu item (Continue, New profile, Guest, Practice, Help) or single header image. |
+| **Help** | PhaseHelp | Optional illustration for controls (OK=Hit, Back=Stand) or strategy reminder. |
+
+Constraints: 128×64 limits how much can be shown at once; prefer a few strong images over cluttered art. Use `images/` in repo for assets; reference in code where each phase is drawn.
 
 ### Phase 3 — Optional extras
 
@@ -153,14 +170,16 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 - [x] **Player profiles**: Up to 4 saved profiles (bank + stats) on SD; last-used remembered.
 - [x] **Guest game**: Play without profile; "Save to profile?" when leaving (Back from Bet/Result).
 - [x] **Practice mode**: Wizard of Odds basic strategy hints during player turn and split prompt.
-- [ ] **Settings**: Optional sound on/off or dealer rules (future).
+- [x] **Settings**: Sound on/off, vibration on/off, dealer hits soft 17 on/off; erase all profiles (reset banks to $3,125). Persisted to SD.
 
 ### Phase 4 — Catalog submission
 
-- [ ] **Screenshot**: Take at least one with qFlipper → `screenshots/ss0.png` (required).
 - [x] Finalize `application.fam` and repo (icon, README, changelog; version 0.4).
+- [x] Add **manifest template** in repo: `manifest.yml` (copy to catalog fork at `applications/Games/blackjack/manifest.yml`; set `origin`, `commit_sha`, and optional `subdir`).
+- [x] Document submission steps in README ("Catalog submission" section).
+- [ ] **Screenshot** (human): Take at least one with qFlipper → `screenshots/ss0.png` (required).
 - [ ] Fork [flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog), create branch (e.g. `username_blackjack_0.4`).
-- [ ] Add `applications/Games/blackjack/manifest.yml` with `sourcecode`, `screenshots`, `changelog`, `description`, `short_description`, `name`, `id`, `category`, `version` (0.4).
+- [ ] Copy `manifest.yml` to fork at `applications/Games/blackjack/manifest.yml`; set `commit_sha` and `origin` (and `subdir` if needed).
 - [ ] Run catalog validation: `python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundle.zip`.
 - [ ] Open PR, fill template, respond to review within 14 days if asked for changes.
 
@@ -172,4 +191,4 @@ python3 tools/bundle.py --nolint applications/Games/blackjack/manifest.yml bundl
 - **SDK**: uFBT from [Flipper downloads](https://flipper.net/pages/downloads); docs at [docs.flipper.net](https://docs.flipper.net/) and [uFBT repo](https://github.com/flipperdevices/flipperzero-ufbt).
 - **Catalog**: Publish via PR to `flipper-application-catalog` with `manifest.yml` under `applications/Games/blackjack/`; validate before submit.
 
-Next practical step: **Phase 4** — take qFlipper screenshot → `screenshots/ss0.png`, then fork catalog repo, add `applications/Games/blackjack/manifest.yml`, validate, and open PR.
+Next practical steps (human tasks last): Fork catalog repo → copy this repo's `manifest.yml` to `applications/Games/blackjack/manifest.yml` in the fork → set `origin` and `commit_sha` (and `subdir` if app is in a subdirectory) → add `screenshots/ss0.png` (qFlipper screenshot) to the app repo and push → validate with `bundle.py` → open PR. See README "Catalog submission" for the full sequence.

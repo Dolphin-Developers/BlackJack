@@ -1,0 +1,26 @@
+# Flipper Apps Catalog manifest template for Blackjack
+# Copy this file to your fork of flipper-application-catalog at:
+#   applications/Games/blackjack/manifest.yml
+# Then: set sourcecode.location.origin to your repo URL, set commit_sha to your release commit, add screenshots/ss0.png, validate, and open a PR.
+# See ROADMAP.md Phase 4 and README "Catalog submission" for steps.
+
+sourcecode:
+  type: git
+  location:
+    origin: https://github.com/YOUR_USERNAME/YOUR_BLACKJACK_REPO.git
+    commit_sha: REPLACE_WITH_COMMIT_SHA
+    # If the app lives in a subdirectory (e.g. BlackJack/), uncomment:
+    # subdir: BlackJack
+
+name: Blackjack
+id: blackjack
+category: Games
+version: "0.5"
+
+short_description: Classic Blackjack with profiles, settings (sound/vibro/dealer S17), and Wizard strategy hints.
+description: "@README.md"
+changelog: "@changelog.md"
+author: Flipper Community
+
+screenshots:
+  - screenshots/ss0.png
